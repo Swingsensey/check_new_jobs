@@ -19,34 +19,21 @@ TOKEN = os.getenv('BOT_TOKEN')
 API_ID = 23009673
 API_HASH = '249328ef42a91e5c80102c3d73c76a9c'
 SESSION_STR = os.getenv('TELEGRAM_SESSION')
-# Список каналов БЕЗ собаки @
+
+# Твой расширенный список каналов
 CHANNELS = [
-    # Твой основной список
-    'vdhl_good', 'mediajobs_ru', 'kinorabotniki', 'gigs_for_creatives', 
+    'vdhl_good', 'mediajobs_ru', 'kinorabochie', 'gigs_for_creatives', 
     'ru_tvjobs', 'work_in_media', 'promofox', 'creative_jobs',
-    
-    # Твой дополнительный список
     'moviestart_ru', 'se_cinema', 'grushamedia', 'teletet', 
-    'cinemapeople', 'my_casting',
-    
-    # ТОП-3 дополнения для коммерческого режима и продакшна (рекомендую!)
-    'distantsiya',           # Дистанция (огромный канал с креативом)
-    'rabota_v_production',   # Работа в продакшне (самое мясо по съемкам)
-    'v_kadre_za_kadrom'      # В кадре и за кадром (вакансии съемочных групп)
+    'cinemapeople', 'my_casting', 'distantsiya', 'rabota_v_production', 'v_kadre_za_kadrom'
 ]
-# Создаем клиента для чтения каналов
+
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
-
-# Список каналов для мониторинга (добавь свои)
-CHANNELS = ['@vdhl_good', '@mediajobs_ru', '@kinorabochie', '@gigs_for_creatives']
-
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 logging.basicConfig(level=logging.INFO)
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
-}
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'}
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
@@ -79,7 +66,7 @@ def is_new_job(job_id):
     conn.close()
     return False
 
-# --- ПАРСЕРЫ (С ЛОГИКОЙ ДЛЯ EXCEL И ТГ) ---
+# --- ПАРСЕРЫ ---
 def search_hh(query, limit=100):
     url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
     results = []
@@ -90,7 +77,7 @@ def search_hh(query, limit=100):
             pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
             results.append({
                 'id': f"hh_{v['id']}",
-                'text': f"🔴 HH: {v['name']}\n{v['alternate_url']}", # ДЛЯ ТГ
+                'text': f"🔴 HH: {v['name']}\n{v['alternate_url']}",
                 'Дата': v['published_at'][:10],
                 'Источник': 'HH',
                 'Вакансия': v['name'],
@@ -111,7 +98,7 @@ def search_trudvsem(query, limit=20):
                 vac = v['vacancy']
                 results.append({
                     'id': f"tr_{vac['id']}",
-                    'text': f"🔵 ТрудВсем: {vac['job-name']}\n{vac['vac_url']}", # ДЛЯ ТГ
+                    'text': f"🔵 ТрудВсем: {vac['job-name']}\n{vac['vac_url']}",
                     'Дата': vac['modification-date'],
                     'Источник': 'ТрудВсем',
                     'Вакансия': vac['job-name'],
@@ -134,7 +121,7 @@ def search_jobfilter(query, limit=20):
             if a:
                 results.append({
                     'id': f"jf_{a['href'][-10:]}",
-                    'text': f"🌐 JF: {a.text.strip()}\nhttps://jobfilter.ru{a['href']}", # ДЛЯ ТГ
+                    'text': f"🌐 JF: {a.text.strip()}\nhttps://jobfilter.ru{a['href']}",
                     'Дата': datetime.now().strftime('%Y-%m-%d'),
                     'Источник': 'JobFilter',
                     'Вакансия': a.text.strip(),
@@ -145,38 +132,44 @@ def search_jobfilter(query, limit=20):
     except: pass
     return results
 
+# --- КРАСИВЫЙ EXCEL ---
+def generate_excel(data):
+    df = pd.DataFrame(data).drop(columns=['id', 'text'])
+    df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
+    df = df.sort_values(by='Дата', ascending=False)
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Вакансии')
+        ws = writer.sheets['Вакансии']
+        header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True, size=12)
+        for col_num, value in enumerate(df.columns.values):
+            cell = ws.cell(row=1, column=col_num + 1)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[chr(65 + col_num)].width = 40
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = ws.dimensions
+    output.seek(0)
+    return output
+
+# --- МОНИТОРИНГ ---
 @client.on(events.NewMessage(chats=CHANNELS))
 async def telethon_handler(event):
     text = event.message.message
-    if not text:
-        return
-
-    # Получаем все подписки из базы
+    if not text: return
     subs = get_all_subs()
-    
-    # Проверяем, есть ли ключевое слово в тексте сообщения
-    matched_users = []
-    text_lower = text.lower()
-    for user_id, keyword in subs:
-        if keyword in text_lower:
-            matched_users.append(user_id)
-            
+    matched_users = [user_id for user_id, kw in subs if kw in text.lower()]
     if matched_users:
-        # Генерируем уникальный ID для сообщения, чтобы не дублировать
-        job_id = f"tg_{event.chat_id}_{event.id}"
-        if is_new_job(job_id):
-            # Получаем название канала
+        if is_new_job(f"tg_{event.chat_id}_{event.id}"):
             chat = await event.get_chat()
-            chat_title = getattr(chat, 'title', 'Telegram Канал')
-            
+            chat_title = getattr(chat, 'title', 'Канал')
             for uid in set(matched_users):
                 try:
-                    msg = f"⚡️ **ГОРЯЧАЯ ВАКАНСИЯ ИЗ КАНАЛА: {chat_title}**\n\n{text[:3500]}"
-                    await bot.send_message(uid, msg, parse_mode="Markdown")
-                except:
-                    pass
+                    await bot.send_message(uid, f"⚡️ **ГОРЯЧАЯ ВАКАНСИЯ: {chat_title}**\n\n{text[:3500]}")
+                except: pass
 
-# --- МОНИТОРИНГ САЙТОВ ---
 async def monitor_sites():
     while True:
         try:
@@ -185,141 +178,62 @@ async def monitor_sites():
                 all_found = search_hh(kw, 3) + search_trudvsem(kw, 3) + search_jobfilter(kw, 3)
                 for job in all_found:
                     if is_new_job(job['id']):
-                        await bot.send_message(user_id, f"🔔 Новинка по вашей подписке [{kw.upper()}]:\n\n{job['text']}", parse_mode="Markdown")
+                        await bot.send_message(user_id, f"🔔 Новинка по подписке [{kw.upper()}]:\n\n{job['text']}")
                         await asyncio.sleep(0.5)
-        except Exception as e:
-            logging.error(f"Error in monitor: {e}")
+        except: pass
         await asyncio.sleep(1800)
 
-def generate_excel(data):
-    # Создаем DataFrame
-    df = pd.DataFrame(data).drop(columns=['id'])
-    
-    # Сортируем: Самые новые даты сверху
-    df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
-    df = df.sort_values(by='Дата', ascending=False)
-
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Вакансии')
-        ws = writer.sheets['Вакансии']
-
-        # Стиль для заголовка: Темно-синий фон, Белый жирный текст
-        header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
-        header_font = Font(color="FFFFFF", bold=True, size=12)
-        
-        for col_num, value in enumerate(df.columns.values):
-            cell = ws.cell(row=1, column=col_num + 1)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal='center')
-            
-            # Устанавливаем ширину колонок (40 для всех, чтобы текст влезал)
-            ws.column_dimensions[chr(65 + col_num)].width = 40
-
-        # Закрепляем первую строку (шапку), чтобы она не уезжала при скролле
-        ws.freeze_panes = 'A2'
-        
-        # Добавляем фильтры (можно будет сортировать по компании или оплате)
-        ws.auto_filter.ref = ws.dimensions
-
-    output.seek(0)
-    return output
-
 # --- ОБРАБОТЧИКИ ---
-
 @dp.message_handler(commands=['start'])
 async def start_cmd(message: types.Message):
     name = message.from_user.first_name
     await message.answer(
-        f"Привет, {name}! 🎬 Я — твой персональный агент по поиску работы в кино и медиа.\n\n"
-        f"**Что я умею:**\n"
-        f"🔍 **Мгновенный поиск:** Напиши название профессии, и я тут же перерою HH.ru, ТрудВсем и JobFilter.\n"
-        f"📂 **Excel-отчеты:** На каждый запрос я присылаю файл с 50 свежими вакансиями.\n"
-        f"⚡ **Live-мониторинг:** Я читаю 17+ элитных Telegram-каналов (*VDHL, Кинорабочие, Gigs for Creatives* и др.) в реальном времени.\n\n"
-        f"**Как запустить авто-поиск:**\n"
-        f"1️⃣ Напиши ключевое слово, например: `режиссер` или `продюсер`.\n"
-        f"2️⃣ Под результатом поиска нажми кнопку **«🔔 Подписаться»**.\n"
-        f"3️⃣ Всё! Как только в каналах или на сайтах появится вакансия с этим словом — я мгновенно пришлю её тебе в личку.\n\n"
-        f"💡 **Совет:** Подписывайся на короткие слова (например, `режиссер`), чтобы я ловил все склонения: *«ищем режиссера»*, *«нужны режиссеры»*.\n\n"
-        f"Что ищем сегодня?",
-        parse_mode="Markdown"
-    )
+        f"Привет, {name}! 👋\n\nЯ ищу вакансии для кино и медиа.\n"
+        f"Напиши профессию (например: `режиссер`), и я пришлю ссылки + Excel.\n\n"
+        f"Как только по твоим подпискам выйдет пост в Telegram-каналах — я пришлю его мгновенно!",
+        parse_mode="Markdown")
 
 @dp.message_handler()
 async def manual_search(message: types.Message):
     query = message.text
-    status_msg = await message.answer(f"🔎 Ищу вакансии по запросу: *{query}*...", parse_mode="Markdown")
+    wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    try:
-        # Собираем данные (уменьшили таймауты, чтобы не висло)
-        hh_all = search_hh(query, limit=100)
-        tr_all = search_trudvsem(query, limit=20)
-        jf_all = search_jobfilter(query, limit=10)
-        
-        # Для Топ-7 берем смесь, чтобы видеть разные сайты
-        top_7 = hh_all[:4] + tr_all[:3] 
-        # Для Excel берем вообще всё
-        full_list = hh_all + tr_all + jf_all
-        
-        if not full_list:
-            await status_msg.edit_text("Ничего не найдено.")
-            return
+    found = search_hh(query, 100) + search_trudvsem(query, 20) + search_jobfilter(query, 10)
+    
+    if not found:
+        await wait.edit_text("Ничего не найдено.")
+        return
 
-        # 1. Вывод в чат (ТОТ САМЫЙ КРАСИВЫЙ ФОРМАТ)
-        for j in top_7:
-            # Выбираем иконку по источнику
-            icon = "🔴" if j['Источник'] == 'HH' else "🔵"
-            msg = f"{icon} {j['Источник']}: {j['Вакансия']}\n{j['Ссылка']}"
-            await message.answer(msg, disable_web_page_preview=True)
-            await asyncio.sleep(0.1)
+    # ВЫДАЧА В ТГ (Твой эталонный стиль)
+    for j in found[:10]:
+        await message.answer(j['text'], disable_web_page_preview=True)
+        await asyncio.sleep(0.1)
 
-        # 2. Excel (присылаем следом)
-        excel_file = generate_excel(full_list)
-        if excel_file:
-            await message.answer_document(
-                types.InputFile(excel_file, filename=f"{query}.xlsx"),
-                caption=f"📊 Собрано вакансий: {len(full_list)}"
-            )
+    # ВЫДАЧА EXCEL
+    excel_file = generate_excel(found)
+    await message.answer_document(types.InputFile(excel_file, filename=f"{query}.xlsx"), caption=f"📊 Полный отчет по '{query}'")
 
-        # 3. Кнопка подписки
-        kb = types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
-        )
-        await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
-        await status_msg.delete()
+    kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
+    await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
+    await wait.delete()
 
-    except Exception as e:
-        logging.error(f"Ошибка поиска: {e}")
-        await message.answer("⚠️ Произошла ошибка. Попробуйте еще раз.")
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
-async def sub_handler(callback_query: types.CallbackQuery):
-    query = callback_query.data.split('|')[1]
-    add_subscription(callback_query.from_user.id, query)
-    await bot.answer_callback_query(callback_query.id, f"Подписка оформлена!", show_alert=True)
-    await bot.send_message(callback_query.from_user.id, f"✅ Готово! Мониторю '{query}' везде.")
+async def sub_handler(cb: types.CallbackQuery):
+    kw = cb.data.split('|')[1]
+    add_subscription(cb.from_user.id, kw)
+    await bot.answer_callback_query(cb.id, "Подписка оформлена!", show_alert=True)
 
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
-async def handle(request):
-    return web.Response(text="Bot is Alive")
+# --- ЗАПУСК ДЛЯ RENDER ---
+async def handle(request): return web.Response(text="Alive")
 
 async def main():
     init_db()
-    
-    # Запуск Веб-сервера (чтобы Render не убивал бота)
     app = web.Application()
     app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    await web.TCPSite(runner, '0.0.0.0', port).start()
-
-    # Запуск фонового мониторинга сайтов
+    runner = web.AppRunner(app); await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
     asyncio.create_task(monitor_sites())
-    # Запускаем чтение каналов
     await client.start()
-    logging.info("Мониторинг Telegram-каналов запущен!")
-    # Запуск бота
     await dp.start_polling()
 
 if __name__ == '__main__':
