@@ -79,20 +79,20 @@ def is_new_job(job_id):
     conn.close()
     return False
 
-# --- ПАРСЕРЫ ---
+# --- ПАРСЕРЫ (С ЛОГИКОЙ ДЛЯ EXCEL И ТГ) ---
 def search_hh(query, limit=100):
-    # Поиск по Москве, 100 вакансий
     url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
     results = []
     try:
-        r = requests.get(url, headers=HEADERS, timeout=5).json()
+        r = requests.get(url, headers=HEADERS, timeout=10).json()
         for v in r.get('items', []):
             sal = v.get('salary')
             pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
             results.append({
                 'id': f"hh_{v['id']}",
+                'text': f"🔴 HH: {v['name']}\n{v['alternate_url']}", # ДЛЯ ТГ
                 'Дата': v['published_at'][:10],
-                'Источник': 'HH',  # Короткое имя
+                'Источник': 'HH',
                 'Вакансия': v['name'],
                 'Компания': v['employer']['name'],
                 'Оплата': pay,
@@ -104,14 +104,14 @@ def search_hh(query, limit=100):
 def search_trudvsem(query, limit=20):
     results = []
     try:
-        # API Работа России
         url = f"https://opendata.trudvsem.ru/api/v1/vacancies/region/77?text={query}"
-        r = requests.get(url, timeout=5).json()
+        r = requests.get(url, timeout=10).json()
         if r.get('results'):
             for v in r['results']['vacancies'][:limit]:
                 vac = v['vacancy']
                 results.append({
                     'id': f"tr_{vac['id']}",
+                    'text': f"🔵 ТрудВсем: {vac['job-name']}\n{vac['vac_url']}", # ДЛЯ ТГ
                     'Дата': vac['modification-date'],
                     'Источник': 'ТрудВсем',
                     'Вакансия': vac['job-name'],
@@ -123,45 +123,26 @@ def search_trudvsem(query, limit=20):
     return results
 
 def search_jobfilter(query, limit=20):
-    # Формируем поисковый запрос
     url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
     results = []
     try:
-        # Пытаемся имитировать браузер максимально подробно
         r = requests.get(url, headers=HEADERS, timeout=10)
-        if r.status_code != 200:
-            return []
-
         soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # Пробуем найти вакансии по разным возможным классам (они их часто меняют)
-        items = soup.find_all('div', {'class': ['vacancy_item', 'vacancy-card', 'vacancy-item', 'item-vacancy']})
-        
-        if not items:
-            # Запасной вариант: ищем просто все ссылки, которые ведут на вакансии
-            items = soup.select('a[href*="/vacancy/"]')
-
+        items = soup.find_all('div', class_='vacancy_item') or soup.find_all('div', class_='vacancy-item')
         for i in items[:limit]:
-            # Ищем ссылку внутри блока или саму ссылку
-            a = i if i.name == 'a' else i.find('a')
-            
-            if a and a.text.strip():
-                link = a['href']
-                if not link.startswith('http'):
-                    link = f"https://jobfilter.ru{link}"
-                
+            a = i.find('a')
+            if a:
                 results.append({
-                    'id': f"jf_{link[-10:]}", # берем хвост ссылки для ID
+                    'id': f"jf_{a['href'][-10:]}",
+                    'text': f"🌐 JF: {a.text.strip()}\nhttps://jobfilter.ru{a['href']}", # ДЛЯ ТГ
                     'Дата': datetime.now().strftime('%Y-%m-%d'),
                     'Источник': 'JobFilter',
-                    'Вакансия': a.text.strip().replace('\n', ' '),
+                    'Вакансия': a.text.strip(),
                     'Компания': '—',
                     'Оплата': 'См. на сайте',
-                    'Ссылка': link
+                    'Ссылка': "https://jobfilter.ru" + a['href'] if not a['href'].startswith('http') else a['href']
                 })
-    except Exception as e:
-        logging.error(f"Ошибка JobFilter: {e}")
-    
+    except: pass
     return results
 
 @client.on(events.NewMessage(chats=CHANNELS))
