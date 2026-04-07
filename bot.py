@@ -205,7 +205,7 @@ async def main():
     await web.TCPSite(runner, '0.0.0.0', port).start()
 
     asyncio.create_task(monitor())
-    await dp.start_polling()
+    await dp.start_polling(skip_updates=True)
 
 if __name__ == '__main__':
     asyncio.run(main())
