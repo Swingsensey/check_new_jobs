@@ -12,6 +12,7 @@ from aiohttp import web
 from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from openpyxl.styles import Font, PatternFill, Alignment
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
@@ -155,6 +156,65 @@ async def telethon_handler(event):
                 except:
                     pass
 
+def generate_pro_excel(query):
+    # ДВИЖОК СБОРА ДАННЫХ ДЛЯ EXCEL (100 ШТУК)
+    raw_data = []
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    # Сбор с HH (100 шт)
+    try:
+        url_hh = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page=100&order_by=publication_time"
+        res = requests.get(url_hh, headers=headers, timeout=5).json()
+        for v in res.get('items', []):
+            s = v.get('salary')
+            pay = f"от {s['from']}" if s and s['from'] else "Договорная"
+            raw_data.append({
+                'Дата': v['published_at'][:10], 'Источник': 'HH',
+                'Вакансия': v['name'], 'Компания': v['employer']['name'],
+                'Оплата': pay, 'Ссылка': v['alternate_url']
+            })
+    except: pass
+
+    # Сбор с ТрудВсем
+    try:
+        url_tr = f"https://opendata.trudvsem.ru/api/v1/vacancies/region/77?text={query}"
+        res = requests.get(url_tr, timeout=5).json()
+        if res.get('results'):
+            for v in res['results']['vacancies'][:30]:
+                vac = v['vacancy']
+                raw_data.append({
+                    'Дата': vac['modification-date'], 'Источник': 'ТрудВсем',
+                    'Вакансия': vac['job-name'], 'Компания': vac['company']['name'],
+                    'Оплата': vac.get('salary', 'Договорная'), 'Ссылка': vac['vac_url']
+                })
+    except: pass
+
+    if not raw_data: return None
+
+    # ОФОРМЛЕНИЕ EXCEL (СИНИЙ СТИЛЬ)
+    df = pd.DataFrame(raw_data)
+    df = df.sort_values(by='Дата', ascending=False)
+    
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Вакансии')
+        ws = writer.sheets['Вакансии']
+        
+        # Синяя шапка, белый текст
+        fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
+        font = Font(color="FFFFFF", bold=True)
+        
+        for col_num, value in enumerate(df.columns.values):
+            cell = ws.cell(row=1, column=col_num + 1)
+            cell.fill = fill
+            cell.font = font
+            cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[chr(65 + col_num)].width = 35 # Ширина колонок
+            
+        ws.freeze_panes = 'A2' # Закрепить шапку
+    output.seek(0)
+    return output
+
 # --- МОНИТОРИНГ САЙТОВ ---
 async def monitor_sites():
     while True:
@@ -207,6 +267,13 @@ async def manual_search(message: types.Message):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
     await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
+    # ДОПОЛНИТЕЛЬНЫЙ ВЫЗОВ EXCEL (НЕ ТРОГАЯ ТВОЙ КОД ВЫШЕ)
+    excel_file = generate_pro_excel(query)
+    if excel_file:
+        await message.answer_document(
+            types.InputFile(excel_file, filename=f"{query}.xlsx"),
+            caption=f"📊 Полный отчет по запросу '{query}' (100+ вакансий)"
+        )
 
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
 async def sub_handler(callback_query: types.CallbackQuery):
