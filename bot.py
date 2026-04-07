@@ -123,24 +123,45 @@ def search_trudvsem(query, limit=20):
     return results
 
 def search_jobfilter(query, limit=20):
+    # Формируем поисковый запрос
     url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
     results = []
     try:
+        # Пытаемся имитировать браузер максимально подробно
         r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code != 200:
+            return []
+
         soup = BeautifulSoup(r.text, 'html.parser')
-        items = soup.find_all('div', class_='vacancy_item') or soup.find_all('div', class_='vacancy-item')
+        
+        # Пробуем найти вакансии по разным возможным классам (они их часто меняют)
+        items = soup.find_all('div', {'class': ['vacancy_item', 'vacancy-card', 'vacancy-item', 'item-vacancy']})
+        
+        if not items:
+            # Запасной вариант: ищем просто все ссылки, которые ведут на вакансии
+            items = soup.select('a[href*="/vacancy/"]')
+
         for i in items[:limit]:
-            a = i.find('a')
-            results.append({
-                'id': f"jf_{a['href']}",
-                'Дата': datetime.now().strftime('%Y-%m-%d'),
-                'Источник': 'JobFilter',
-                'Вакансия': a.text.strip(),
-                'Компания': '—',
-                'Оплата': 'См. на сайте',
-                'Ссылка': "https://jobfilter.ru" + a['href'] if not a['href'].startswith('http') else a['href']
-            })
-    except: pass
+            # Ищем ссылку внутри блока или саму ссылку
+            a = i if i.name == 'a' else i.find('a')
+            
+            if a and a.text.strip():
+                link = a['href']
+                if not link.startswith('http'):
+                    link = f"https://jobfilter.ru{link}"
+                
+                results.append({
+                    'id': f"jf_{link[-10:]}", # берем хвост ссылки для ID
+                    'Дата': datetime.now().strftime('%Y-%m-%d'),
+                    'Источник': 'JobFilter',
+                    'Вакансия': a.text.strip().replace('\n', ' '),
+                    'Компания': '—',
+                    'Оплата': 'См. на сайте',
+                    'Ссылка': link
+                })
+    except Exception as e:
+        logging.error(f"Ошибка JobFilter: {e}")
+    
     return results
 
 @client.on(events.NewMessage(chats=CHANNELS))
