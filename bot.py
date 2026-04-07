@@ -10,9 +10,16 @@ from aiogram.utils import executor
 from bs4 import BeautifulSoup
 from aiohttp import web
 from datetime import datetime
+from telethon import TelegramClient, events
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
+API_ID = 23009673
+API_HASH = '249328ef42a91e5c80102c3d73c76a9c'
+
+# Список каналов для мониторинга (добавь свои)
+CHANNELS = ['@vdhl_good', '@mediajobs_ru', '@kinorabochie', '@gigs_for_creatives']
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 logging.basicConfig(level=logging.INFO)
@@ -52,82 +59,64 @@ def is_new_job(job_id):
     conn.close()
     return False
 
-# --- УЛУЧШЕННЫЕ ПАРСЕРЫ ---
-
-def fetch_data(query, limit=50):
-    all_jobs = []
-    
-    # 1. HH.RU - Обычный поиск (широкий)
+# --- ПАРСЕРЫ ---
+def search_hh(query, limit=5):
+    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
+    results = []
     try:
-        url_hh = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
-        r = requests.get(url_hh, headers=HEADERS, timeout=10).json()
+        r = requests.get(url, headers=HEADERS, timeout=10).json()
         for v in r.get('items', []):
-            sal = v.get('salary')
-            pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
-            all_jobs.append({
+            results.append({
                 'id': f"hh_{v['id']}",
-                'Дата': v['published_at'][:10],
-                'Источник': 'HH.ru',
-                'Вакансия': v['name'],
-                'Компания': v['employer']['name'],
-                'Оплата': pay,
-                'Ссылка': v['alternate_url']
+                'text': f"🔴 **HH: {v['name']}**\n{v['alternate_url']}"
             })
-    except Exception as e:
-        logging.error(f"HH error: {e}")
+    except: pass
+    return results
 
-    # 2. JobFilter - Парсинг
+def search_trudvsem(query, limit=5):
+    results = []
     try:
-        url_jf = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
-        r = requests.get(url_jf, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        items = soup.find_all('div', {'class': ['vacancy_item', 'vacancy-card', 'vacancy-item']})
-        for i in items[:20]:
-            a = i.find('a')
-            if a:
-                all_jobs.append({
-                    'id': f"jf_{a['href']}",
-                    'Дата': datetime.now().strftime('%Y-%m-%d'),
-                    'Источник': 'JobFilter',
-                    'Вакансия': a.text.strip(),
-                    'Компания': '—',
-                    'Оплата': 'См. на сайте',
-                    'Ссылка': "https://jobfilter.ru" + a['href'] if not a['href'].startswith('http') else a['href']
+        url = f"https://opendata.trudvsem.ru/api/v1/vacancies/region/77?text={query}"
+        r = requests.get(url, timeout=10).json()
+        if r.get('results'):
+            for v in r['results']['vacancies'][:limit]:
+                vac = v['vacancy']
+                results.append({
+                    'id': f"tr_{vac['id']}",
+                    'text': f"🔵 **ТрудВсем: {vac['job-name']}**\n{vac['vac_url']}"
                 })
-    except Exception as e:
-        logging.error(f"JF error: {e}")
-    
-    # Сортировка по дате (свежие сверху)
-    all_jobs.sort(key=lambda x: x['Дата'], reverse=True)
-    return all_jobs[:limit]
+    except: pass
+    return results
 
-# --- КРАСИВЫЙ EXCEL ---
-def generate_excel(data):
-    df = pd.DataFrame(data).drop(columns=['id'])
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Вакансии')
-        # Авто-подбор ширины колонок
-        worksheet = writer.sheets['Вакансии']
-        for col_num, value in enumerate(df.columns.values):
-            worksheet.column_dimensions[chr(65 + col_num)].width = 30
-    output.seek(0)
-    return output
+def search_jobfilter(query, limit=5):
+    url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
+    results = []
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        items = soup.find_all('div', class_='vacancy_item') or soup.find_all('div', class_='vacancy-item')
+        for i in items[:limit]:
+            a = i.find('a')
+            results.append({
+                'id': f"jf_{a['href']}",
+                'text': f"🌐 **JF: {a.text.strip()}**\nhttps://jobfilter.ru{a['href']}"
+            })
+    except: pass
+    return results
 
-# --- ФОНОВЫЙ МОНИТОРИНГ ---
-async def monitor():
+# --- МОНИТОРИНГ САЙТОВ ---
+async def monitor_sites():
     while True:
         try:
             subs = get_all_subs()
             for user_id, kw in subs:
-                found = fetch_data(kw, limit=5)
-                for job in found:
+                all_found = search_hh(kw, 3) + search_trudvsem(kw, 3) + search_jobfilter(kw, 3)
+                for job in all_found:
                     if is_new_job(job['id']):
-                        msg = (f"🔔 **Новинка по подписке [{kw.upper()}]:**\n\n"
-                               f"🔴 HH: {job['Вакансия']}\n💰 {job['Оплата']}\n{job['Ссылка']}")
-                        await bot.send_message(user_id, msg, disable_web_page_preview=True)
+                        await bot.send_message(user_id, f"🔔 Новинка по вашей подписке [{kw.upper()}]:\n\n{job['text']}", parse_mode="Markdown")
                         await asyncio.sleep(0.5)
-        except: pass
+        except Exception as e:
+            logging.error(f"Error in monitor: {e}")
         await asyncio.sleep(1800)
 
 # --- ОБРАБОТЧИКИ ---
@@ -137,61 +126,59 @@ async def start_cmd(message: types.Message):
     name = message.from_user.first_name
     await message.answer(
         f"Привет, {name}! 👋\n\n"
-        f"Я ищу вакансии по всем площадкам.\n\n"
+        f"Я ищу вакансии для кино и медиа (HH, ТрудВсем, JobFilter + Telegram-каналы).\n\n"
         f"**Как работать:**\n"
-        f"Просто напиши запрос (напр. `режиссер рекламы`) и я пришлю ссылки + Excel-отчет.\n\n"
-        f"Что ищем?", parse_mode="Markdown"
+        f"1. Напиши профессию (напр. `Креативный продюсер`).\n"
+        f"2. Под результатом нажми кнопку подписки.\n"
+        f"3. Я буду сам присылать новые вакансии из сайтов и каналов!",
+        parse_mode="Markdown"
     )
 
 @dp.message_handler()
-async def search_handler(message: types.Message):
+async def manual_search(message: types.Message):
     query = message.text
-    wait = await message.answer(f"🔎 Ищу вакансии по запросу: *{query}*...", parse_mode="Markdown")
+    await message.answer(f"🔎 Ищу вакансии по запросу: *{query}*...", parse_mode="Markdown")
     
-    data = fetch_data(query, limit=50)
-    if not data:
-        await wait.edit_text("Ничего не найдено.")
+    found = search_hh(query) + search_trudvsem(query) + search_jobfilter(query)
+    
+    if not found:
+        await message.answer("Ничего не найдено.")
         return
 
-    # 1. Сообщения (Красивый формат как просил)
-    await message.answer(f"🔝 **Топ-7 вакансий по запросу '{query}':**")
-    for j in data[:7]:
-        msg = f"🔴 {j['Источник']}: {j['Вакансия']}\n💰 {j['Оплата']}\n{j['Ссылка']}"
-        await message.answer(msg, disable_web_page_preview=True)
-        await asyncio.sleep(0.2)
-
-    # 2. Файл Excel
-    file_data = generate_excel(data)
-    await message.answer_document(
-        types.InputFile(file_data, filename=f"{query}.xlsx"),
-        caption=f"📊 Полный отчет (50 шт) по запросу '{query}'"
-    )
-
-    # 3. Кнопка подписки
-    kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
-    await message.answer("Получать новые вакансии по этому запросу автоматически?", reply_markup=kb)
-    await wait.delete()
+    for j in found:
+        await message.answer(j['text'], parse_mode="Markdown")
+    
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
+    await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
 
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
-async def sub_callback(cb: types.CallbackQuery):
-    kw = cb.data.split('|')[1]
-    add_subscription(cb.from_user.id, kw)
-    await bot.answer_callback_query(cb.id, f"Подписка на {kw} оформлена!", show_alert=True)
+async def sub_handler(callback_query: types.CallbackQuery):
+    query = callback_query.data.split('|')[1]
+    add_subscription(callback_query.from_user.id, query)
+    await bot.answer_callback_query(callback_query.id, f"Подписка оформлена!", show_alert=True)
+    await bot.send_message(callback_query.from_user.id, f"✅ Готово! Мониторю '{query}' везде.")
 
-# --- ВЕБ-СЕРВЕР (RENDER) ---
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request):
-    return web.Response(text="Alive")
+    return web.Response(text="Bot is Alive")
 
 async def main():
     init_db()
+    
+    # Запуск Веб-сервера (чтобы Render не убивал бота)
     app = web.Application()
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 8080))
     await web.TCPSite(runner, '0.0.0.0', port).start()
-    asyncio.create_task(monitor())
-    await dp.start_polling(skip_updates=True)
+
+    # Запуск фонового мониторинга сайтов
+    asyncio.create_task(monitor_sites())
+    
+    # Запуск бота
+    await dp.start_polling()
 
 if __name__ == '__main__':
     asyncio.run(main())
