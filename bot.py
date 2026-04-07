@@ -57,9 +57,9 @@ def is_new_job(job_id):
 def fetch_data(query, limit=50):
     all_jobs = []
     
-    # 1. HH.RU - Ищем ТОЛЬКО в названии вакансии (search_field=name)
+    # 1. HH.RU - Обычный поиск (широкий)
     try:
-        url_hh = f"https://api.hh.ru/vacancies?text={query}&search_field=name&area=1&per_page={limit}&order_by=publication_time"
+        url_hh = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
         r = requests.get(url_hh, headers=HEADERS, timeout=10).json()
         for v in r.get('items', []):
             sal = v.get('salary')
@@ -97,30 +97,20 @@ def fetch_data(query, limit=50):
     except Exception as e:
         logging.error(f"JF error: {e}")
     
-    # Удаляем дубли и сортируем
-    unique_jobs = []
-    seen = set()
-    for j in all_jobs:
-        if j['Ссылка'] not in seen:
-            unique_jobs.append(j)
-            seen.add(j['Ссылка'])
-    
-    unique_jobs.sort(key=lambda x: x['Дата'], reverse=True)
-    return unique_jobs[:limit]
+    # Сортировка по дате (свежие сверху)
+    all_jobs.sort(key=lambda x: x['Дата'], reverse=True)
+    return all_jobs[:limit]
 
 # --- КРАСИВЫЙ EXCEL ---
 def generate_excel(data):
     df = pd.DataFrame(data).drop(columns=['id'])
     output = BytesIO()
-    # Настройка стилей через ExcelWriter
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Вакансии')
-        workbook = writer.book
+        # Авто-подбор ширины колонок
         worksheet = writer.sheets['Вакансии']
-        # Делаем заголовок жирным и настраиваем ширину колонок
         for col_num, value in enumerate(df.columns.values):
-            column_len = max(df[value].astype(str).map(len).max(), len(value)) + 2
-            worksheet.column_dimensions[chr(65 + col_num)].width = min(column_len, 50)
+            worksheet.column_dimensions[chr(65 + col_num)].width = 30
     output.seek(0)
     return output
 
@@ -133,9 +123,9 @@ async def monitor():
                 found = fetch_data(kw, limit=5)
                 for job in found:
                     if is_new_job(job['id']):
-                        msg = (f"🔔 **Новая вакансия по подписке [{kw.upper()}]:**\n\n"
-                               f"💼 {job['Вакансия']}\n💰 {job['Оплата']}\n📍 {job['Источник']}\n🔗 [Открыть]({job['Ссылка']})")
-                        await bot.send_message(user_id, msg, parse_mode="Markdown")
+                        msg = (f"🔔 **Новинка по подписке [{kw.upper()}]:**\n\n"
+                               f"🔴 HH: {job['Вакансия']}\n💰 {job['Оплата']}\n{job['Ссылка']}")
+                        await bot.send_message(user_id, msg, disable_web_page_preview=True)
                         await asyncio.sleep(0.5)
         except: pass
         await asyncio.sleep(1800)
@@ -147,12 +137,9 @@ async def start_cmd(message: types.Message):
     name = message.from_user.first_name
     await message.answer(
         f"Привет, {name}! 👋\n\n"
-        f"Я ищу вакансии **только по названиям**, чтобы выдавать самый релевантный результат.\n\n"
-        f"**Механика:**\n"
-        f"1. Пишешь запрос (напр. `режиссер рекламы`).\n"
-        f"2. Получаешь 7 свежих ссылок сообщением.\n"
-        f"3. Получаешь красивый Excel-отчет (50 вакансий).\n"
-        f"4. Можешь подписаться на авто-мониторинг кнопкой.\n\n"
+        f"Я ищу вакансии по всем площадкам.\n\n"
+        f"**Как работать:**\n"
+        f"Просто напиши запрос (напр. `режиссер рекламы`) и я пришлю ссылки + Excel-отчет.\n\n"
         f"Что ищем?", parse_mode="Markdown"
     )
 
@@ -163,26 +150,26 @@ async def search_handler(message: types.Message):
     
     data = fetch_data(query, limit=50)
     if not data:
-        await wait.edit_text("Ничего не найдено. Попробуй сократить запрос.")
+        await wait.edit_text("Ничего не найдено.")
         return
 
-    # 1. Сообщения (Топ-7)
-    await message.answer(f"🔝 **Самые свежие для чата:**", parse_mode="Markdown")
+    # 1. Сообщения (Красивый формат как просил)
+    await message.answer(f"🔝 **Топ-7 вакансий по запросу '{query}':**")
     for j in data[:7]:
-        msg = f"📍 {j['Источник']} | {j['Дата']}\n💼 **{j['Вакансия']}**\n💰 {j['Оплата']}\n🔗 [Открыть]({j['Ссылка']})"
-        await message.answer(msg, parse_mode="Markdown", disable_web_page_preview=True)
+        msg = f"🔴 {j['Источник']}: {j['Вакансия']}\n💰 {j['Оплата']}\n{j['Ссылка']}"
+        await message.answer(msg, disable_web_page_preview=True)
         await asyncio.sleep(0.2)
 
     # 2. Файл Excel
     file_data = generate_excel(data)
     await message.answer_document(
         types.InputFile(file_data, filename=f"{query}.xlsx"),
-        caption=f"📊 Полный отчет по запросу '{query}'"
+        caption=f"📊 Полный отчет (50 шт) по запросу '{query}'"
     )
 
     # 3. Кнопка подписки
     kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
-    await message.answer("Хотите получать новые вакансии по этому запросу автоматически?", reply_markup=kb)
+    await message.answer("Получать новые вакансии по этому запросу автоматически?", reply_markup=kb)
     await wait.delete()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
@@ -193,7 +180,7 @@ async def sub_callback(cb: types.CallbackQuery):
 
 # --- ВЕБ-СЕРВЕР (RENDER) ---
 async def handle(request):
-    return web.Response(text="Bot is alive")
+    return web.Response(text="Alive")
 
 async def main():
     init_db()
@@ -203,7 +190,6 @@ async def main():
     await runner.setup()
     port = int(os.environ.get("PORT", 8080))
     await web.TCPSite(runner, '0.0.0.0', port).start()
-
     asyncio.create_task(monitor())
     await dp.start_polling(skip_updates=True)
 
