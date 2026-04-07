@@ -11,11 +11,18 @@ from bs4 import BeautifulSoup
 from aiohttp import web
 from datetime import datetime
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
 API_ID = 23009673
 API_HASH = '249328ef42a91e5c80102c3d73c76a9c'
+SESSION_STR = os.getenv('TELEGRAM_SESSION')
+# Список каналов БЕЗ собаки @
+CHANNELS = ['vdhl_good', 'mediajobs_ru', 'kinorabochie', 'gigs_for_creatives', 'ru_tvjobs', 'work_in_media']
+
+# Создаем клиента для чтения каналов
+client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 # Список каналов для мониторинга (добавь свои)
 CHANNELS = ['@vdhl_good', '@mediajobs_ru', '@kinorabochie', '@gigs_for_creatives']
@@ -104,6 +111,37 @@ def search_jobfilter(query, limit=5):
     except: pass
     return results
 
+@client.on(events.NewMessage(chats=CHANNELS))
+async def telethon_handler(event):
+    text = event.message.message
+    if not text:
+        return
+
+    # Получаем все подписки из базы
+    subs = get_all_subs()
+    
+    # Проверяем, есть ли ключевое слово в тексте сообщения
+    matched_users = []
+    text_lower = text.lower()
+    for user_id, keyword in subs:
+        if keyword in text_lower:
+            matched_users.append(user_id)
+            
+    if matched_users:
+        # Генерируем уникальный ID для сообщения, чтобы не дублировать
+        job_id = f"tg_{event.chat_id}_{event.id}"
+        if is_new_job(job_id):
+            # Получаем название канала
+            chat = await event.get_chat()
+            chat_title = getattr(chat, 'title', 'Telegram Канал')
+            
+            for uid in set(matched_users):
+                try:
+                    msg = f"⚡️ **ГОРЯЧАЯ ВАКАНСИЯ ИЗ КАНАЛА: {chat_title}**\n\n{text[:3500]}"
+                    await bot.send_message(uid, msg, parse_mode="Markdown")
+                except:
+                    pass
+
 # --- МОНИТОРИНГ САЙТОВ ---
 async def monitor_sites():
     while True:
@@ -176,7 +214,9 @@ async def main():
 
     # Запуск фонового мониторинга сайтов
     asyncio.create_task(monitor_sites())
-    
+    # Запускаем чтение каналов
+    await client.start()
+    logging.info("Мониторинг Telegram-каналов запущен!")
     # Запуск бота
     await dp.start_polling()
 
