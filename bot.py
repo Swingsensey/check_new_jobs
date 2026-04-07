@@ -247,53 +247,49 @@ async def start_cmd(message: types.Message):
 @dp.message_handler()
 async def manual_search(message: types.Message):
     query = message.text
-    # Отправляем статус
-    status_msg = await message.answer(f"🔎 Начинаю глобальный поиск: *{query}*...", parse_mode="Markdown")
+    status_msg = await message.answer(f"🔎 Ищу вакансии по запросу: *{query}*...", parse_mode="Markdown")
     
     try:
-        # Собираем данные
-        logging.info(f"Запуск поиска для: {query}")
+        # Собираем данные (уменьшили таймауты, чтобы не висло)
+        hh_all = search_hh(query, limit=100)
+        tr_all = search_trudvsem(query, limit=20)
+        jf_all = search_jobfilter(query, limit=10)
         
-        # Ограничиваем время ожидания для каждого парсера
-        hh_data = search_hh(query)
-        trud_data = search_trudvsem(query)
-        jf_data = search_jobfilter(query)
+        # Для Топ-7 берем смесь, чтобы видеть разные сайты
+        top_7 = hh_all[:4] + tr_all[:3] 
+        # Для Excel берем вообще всё
+        full_list = hh_all + tr_all + jf_all
         
-        found = hh_data + trud_data + jf_data
-        
-        if not found:
-            await status_msg.edit_text("Ничего не найдено. Попробуй изменить запрос.")
+        if not full_list:
+            await status_msg.edit_text("Ничего не найдено.")
             return
 
-        # 1. Отправляем Топ-7
-        await message.answer(f"🔝 **Топ-7 вакансий по запросу '{query}':**", parse_mode="Markdown")
-        for j in found[:7]:
-            msg = f"🔴 {j['Источник']}: {j['Вакансия']}\n💰 {j['Оплата']}\n{j['Ссылка']}"
+        # 1. Вывод в чат (ТОТ САМЫЙ КРАСИВЫЙ ФОРМАТ)
+        for j in top_7:
+            # Выбираем иконку по источнику
+            icon = "🔴" if j['Источник'] == 'HH' else "🔵"
+            msg = f"{icon} {j['Источник']}: {j['Вакансия']}\n{j['Ссылка']}"
             await message.answer(msg, disable_web_page_preview=True)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.1)
 
-        # 2. Excel
-        excel_file = generate_excel(found)
+        # 2. Excel (присылаем следом)
+        excel_file = generate_excel(full_list)
         if excel_file:
-            filename = f"{query.replace(' ', '_')}.xlsx"
             await message.answer_document(
-                types.InputFile(excel_file, filename=filename),
-                caption=f"📊 Собрано вакансий: {len(found)}"
+                types.InputFile(excel_file, filename=f"{query}.xlsx"),
+                caption=f"📊 Собрано вакансий: {len(full_list)}"
             )
-        else:
-            await message.answer("⚠️ Не удалось создать Excel-файл, но ссылки выше.")
 
         # 3. Кнопка подписки
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
+        kb = types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
+        )
         await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
-        
         await status_msg.delete()
 
     except Exception as e:
-        logging.error(f"Глобальная ошибка поиска: {e}")
-        await message.answer(f"❌ Произошла ошибка при поиске: {e}")
-
+        logging.error(f"Ошибка поиска: {e}")
+        await message.answer("⚠️ Произошла ошибка. Попробуйте еще раз.")
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
 async def sub_handler(callback_query: types.CallbackQuery):
     query = callback_query.data.split('|')[1]
