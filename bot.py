@@ -19,8 +19,20 @@ API_ID = 23009673
 API_HASH = '249328ef42a91e5c80102c3d73c76a9c'
 SESSION_STR = os.getenv('TELEGRAM_SESSION')
 # Список каналов БЕЗ собаки @
-CHANNELS = ['vdhl_good', 'mediajobs_ru', 'kinorabochie', 'gigs_for_creatives', 'ru_tvjobs', 'work_in_media']
-
+CHANNELS = [
+    # Твой основной список
+    'vdhl_good', 'mediajobs_ru', 'kinorabochie', 'gigs_for_creatives', 
+    'ru_tvjobs', 'work_in_media', 'promofox', 'creative_jobs',
+    
+    # Твой дополнительный список
+    'moviestart_ru', 'se_cinema', 'grushamedia', 'teletet', 
+    'cinemapeople', 'my_casting',
+    
+    # ТОП-3 дополнения для коммерческого режима и продакшна (рекомендую!)
+    'distantsiya',           # Дистанция (огромный канал с креативом)
+    'rabota_v_production',   # Работа в продакшне (самое мясо по съемкам)
+    'v_kadre_za_kadrom'      # В кадре и за кадром (вакансии съемочных групп)
+]
 # Создаем клиента для чтения каналов
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
@@ -163,12 +175,17 @@ async def monitor_sites():
 async def start_cmd(message: types.Message):
     name = message.from_user.first_name
     await message.answer(
-        f"Привет, {name}! 👋\n\n"
-        f"Я ищу вакансии для кино и медиа (HH, ТрудВсем, JobFilter + Telegram-каналы).\n\n"
-        f"**Как работать:**\n"
-        f"1. Напиши профессию (напр. `Креативный продюсер`).\n"
-        f"2. Под результатом нажми кнопку подписки.\n"
-        f"3. Я буду сам присылать новые вакансии из сайтов и каналов!",
+        f"Привет, {name}! 🎬 Я — твой персональный агент по поиску работы в кино и медиа.\n\n"
+        f"**Что я умею:**\n"
+        f"🔍 **Мгновенный поиск:** Напиши название профессии, и я тут же перерою HH.ru, ТрудВсем и JobFilter.\n"
+        f"📂 **Excel-отчеты:** На каждый запрос я присылаю файл с 50 свежими вакансиями.\n"
+        f"⚡ **Live-мониторинг:** Я читаю 17+ элитных Telegram-каналов (*VDHL, Кинорабочие, Gigs for Creatives* и др.) в реальном времени.\n\n"
+        f"**Как запустить авто-поиск:**\n"
+        f"1️⃣ Напиши ключевое слово, например: `режиссер` или `продюсер`.\n"
+        f"2️⃣ Под результатом поиска нажми кнопку **«🔔 Подписаться»**.\n"
+        f"3️⃣ Всё! Как только в каналах или на сайтах появится вакансия с этим словом — я мгновенно пришлю её тебе в личку.\n\n"
+        f"💡 **Совет:** Подписывайся на короткие слова (например, `режиссер`), чтобы я ловил все склонения: *«ищем режиссера»*, *«нужны режиссеры»*.\n\n"
+        f"Что ищем сегодня?",
         parse_mode="Markdown"
     )
 
