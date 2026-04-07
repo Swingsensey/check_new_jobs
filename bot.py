@@ -12,6 +12,7 @@ from aiohttp import web
 from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from openpyxl.styles import Font, PatternFill, Alignment
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
@@ -79,20 +80,29 @@ def is_new_job(job_id):
     return False
 
 # --- ПАРСЕРЫ ---
-def search_hh(query, limit=5):
-    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
+# --- ПАРСЕРЫ (ОБНОВЛЕННЫЕ) ---
+def search_hh(query, limit=100):
+    # Добавили per_page=100 и поиск по Москве
+    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page=100&order_by=publication_time"
     results = []
     try:
         r = requests.get(url, headers=HEADERS, timeout=10).json()
         for v in r.get('items', []):
+            sal = v.get('salary')
+            pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
             results.append({
                 'id': f"hh_{v['id']}",
-                'text': f"🔴 **HH: {v['name']}**\n{v['alternate_url']}"
+                'Дата': v['published_at'][:10],
+                'Источник': 'HH.ru',
+                'Вакансия': v['name'],
+                'Компания': v['employer']['name'],
+                'Оплата': pay,
+                'Ссылка': v['alternate_url']
             })
     except: pass
     return results
 
-def search_trudvsem(query, limit=5):
+def search_trudvsem(query, limit=50):
     results = []
     try:
         url = f"https://opendata.trudvsem.ru/api/v1/vacancies/region/77?text={query}"
@@ -102,12 +112,17 @@ def search_trudvsem(query, limit=5):
                 vac = v['vacancy']
                 results.append({
                     'id': f"tr_{vac['id']}",
-                    'text': f"🔵 **ТрудВсем: {vac['job-name']}**\n{vac['vac_url']}"
+                    'Дата': vac['modification-date'],
+                    'Источник': 'ТрудВсем',
+                    'Вакансия': vac['job-name'],
+                    'Компания': vac['company']['name'],
+                    'Оплата': vac.get('salary', 'Договорная'),
+                    'Ссылка': vac['vac_url']
                 })
     except: pass
     return results
 
-def search_jobfilter(query, limit=5):
+def search_jobfilter(query, limit=20):
     url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
     results = []
     try:
@@ -118,7 +133,12 @@ def search_jobfilter(query, limit=5):
             a = i.find('a')
             results.append({
                 'id': f"jf_{a['href']}",
-                'text': f"🌐 **JF: {a.text.strip()}**\nhttps://jobfilter.ru{a['href']}"
+                'Дата': datetime.now().strftime('%Y-%m-%d'),
+                'Источник': 'JobFilter',
+                'Вакансия': a.text.strip(),
+                'Компания': '—',
+                'Оплата': 'См. на сайте',
+                'Ссылка': "https://jobfilter.ru" + a['href'] if not a['href'].startswith('http') else a['href']
             })
     except: pass
     return results
@@ -169,6 +189,41 @@ async def monitor_sites():
             logging.error(f"Error in monitor: {e}")
         await asyncio.sleep(1800)
 
+def generate_excel(data):
+    # Создаем DataFrame
+    df = pd.DataFrame(data).drop(columns=['id'])
+    
+    # Сортируем: Самые новые даты сверху
+    df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
+    df = df.sort_values(by='Дата', ascending=False)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Вакансии')
+        ws = writer.sheets['Вакансии']
+
+        # Стиль для заголовка: Темно-синий фон, Белый жирный текст
+        header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True, size=12)
+        
+        for col_num, value in enumerate(df.columns.values):
+            cell = ws.cell(row=1, column=col_num + 1)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center')
+            
+            # Устанавливаем ширину колонок (40 для всех, чтобы текст влезал)
+            ws.column_dimensions[chr(65 + col_num)].width = 40
+
+        # Закрепляем первую строку (шапку), чтобы она не уезжала при скролле
+        ws.freeze_panes = 'A2'
+        
+        # Добавляем фильтры (можно будет сортировать по компании или оплате)
+        ws.auto_filter.ref = ws.dimensions
+
+    output.seek(0)
+    return output
+
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message_handler(commands=['start'])
@@ -203,9 +258,18 @@ async def manual_search(message: types.Message):
     for j in found:
         await message.answer(j['text'], parse_mode="Markdown")
     
+    # 2. Генерируем и отправляем КРАСИВЫЙ Excel (из всех найденных, до 100+)
+    file_data = generate_excel(found)
+    await message.answer_document(
+        types.InputFile(file_data, filename=f"{query.replace(' ', '_')}.xlsx"),
+        caption=f"📊 Полный отчет по запросу '{query}'"
+    )
+    
+    # 3. Кнопка подписки
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
     await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
+    await wait.delete()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
 async def sub_handler(callback_query: types.CallbackQuery):
