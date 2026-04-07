@@ -21,7 +21,7 @@ SESSION_STR = os.getenv('TELEGRAM_SESSION')
 # Список каналов БЕЗ собаки @
 CHANNELS = [
     # Твой основной список
-    'vdhl_good', 'mediajobs_ru', 'kinorabochie', 'gigs_for_creatives', 
+    'vdhl_good', 'mediajobs_ru', 'kinorabotniki', 'gigs_for_creatives', 
     'ru_tvjobs', 'work_in_media', 'promofox', 'creative_jobs',
     
     # Твой дополнительный список
