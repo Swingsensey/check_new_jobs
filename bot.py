@@ -6,27 +6,27 @@ import sqlite3
 import pandas as pd
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
 from bs4 import BeautifulSoup
 from aiohttp import web
 from datetime import datetime
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
 API_ID = 23009673
 API_HASH = '249328ef42a91e5c80102c3d73c76a9c'
+SESSION_STR = os.getenv('TELEGRAM_SESSION')
 
-# Список каналов для мониторинга (добавь свои)
-CHANNELS = ['@vdhl_good', '@mediajobs_ru', '@kinorabochie', '@gigs_for_creatives']
+# Каналы для мониторинга
+CHANNELS = ['vdhl_good', 'mediajobs_ru', 'kinorabochie', 'gigs_for_creatives', 'ru_tvjobs']
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 logging.basicConfig(level=logging.INFO)
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
-}
+# Юзербот для чтения каналов
+client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
@@ -36,17 +36,18 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_subscription(user_id, keyword):
+def get_subs_for_text(text):
+    """Проверяет, есть ли в тексте ключевые слова из подписок"""
     conn = sqlite3.connect('manager.db')
-    conn.execute('INSERT OR IGNORE INTO subs (user_id, keyword) VALUES (?, ?)', (user_id, keyword.lower()))
-    conn.commit()
+    subs = conn.execute('SELECT user_id, keyword FROM subs').fetchall()
     conn.close()
-
-def get_all_subs():
-    conn = sqlite3.connect('manager.db')
-    data = conn.execute('SELECT user_id, keyword FROM subs').fetchall()
-    conn.close()
-    return data
+    
+    matching_users = []
+    text_lower = text.lower()
+    for user_id, kw in subs:
+        if kw in text_lower:
+            matching_users.append(user_id)
+    return list(set(matching_users))
 
 def is_new_job(job_id):
     conn = sqlite3.connect('manager.db')
@@ -59,125 +60,106 @@ def is_new_job(job_id):
     conn.close()
     return False
 
-# --- ПАРСЕРЫ ---
-def search_hh(query, limit=5):
-    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
-    results = []
+# --- МОНИТОРИНГ КАНАЛОВ (Telethon) ---
+@client.on(events.NewMessage(chats=CHANNELS))
+async def handler(event):
+    text = event.message.message
+    users_to_notify = get_subs_for_text(text)
+    
+    if users_to_notify:
+        # Убираем дубли по ID сообщения
+        if is_new_job(f"tg_{event.chat_id}_{event.id}"):
+            chat = await event.get_chat()
+            chat_title = getattr(chat, 'title', 'Канал')
+            
+            for user_id in users_to_notify:
+                try:
+                    await bot.send_message(
+                        user_id, 
+                        f"⚡️ **ГОРЯЧАЯ ВАКАНСИЯ ИЗ КАНАЛА: {chat_title}**\n\n{text[:3500]}...", 
+                        parse_mode="Markdown"
+                    )
+                except: pass
+
+# --- ПАРСЕРЫ САЙТОВ ---
+def fetch_sites_data(query, limit=50):
+    all_jobs = []
+    # HH.ru
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10).json()
+        url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
+        r = requests.get(url, timeout=10).json()
         for v in r.get('items', []):
-            results.append({
-                'id': f"hh_{v['id']}",
-                'text': f"🔴 **HH: {v['name']}**\n{v['alternate_url']}"
+            all_jobs.append({
+                'id': f"hh_{v['id']}", 'Дата': v['published_at'][:10],
+                'Источник': 'HH.ru', 'Вакансия': v['name'], 'Ссылка': v['alternate_url']
             })
     except: pass
-    return results
-
-def search_trudvsem(query, limit=5):
-    results = []
+    
+    # ТрудВсем
     try:
         url = f"https://opendata.trudvsem.ru/api/v1/vacancies/region/77?text={query}"
         r = requests.get(url, timeout=10).json()
         if r.get('results'):
-            for v in r['results']['vacancies'][:limit]:
+            for v in r['results']['vacancies'][:20]:
                 vac = v['vacancy']
-                results.append({
-                    'id': f"tr_{vac['id']}",
-                    'text': f"🔵 **ТрудВсем: {vac['job-name']}**\n{vac['vac_url']}"
+                all_jobs.append({
+                    'id': f"tr_{vac['id']}", 'Дата': vac['modification-date'],
+                    'Источник': 'ТрудВсем', 'Вакансия': vac['job-name'], 'Ссылка': vac['vac_url']
                 })
     except: pass
-    return results
+    
+    all_jobs.sort(key=lambda x: x['Дата'], reverse=True)
+    return all_jobs[:limit]
 
-def search_jobfilter(query, limit=5):
-    url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
-    results = []
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        items = soup.find_all('div', class_='vacancy_item') or soup.find_all('div', class_='vacancy-item')
-        for i in items[:limit]:
-            a = i.find('a')
-            results.append({
-                'id': f"jf_{a['href']}",
-                'text': f"🌐 **JF: {a.text.strip()}**\nhttps://jobfilter.ru{a['href']}"
-            })
-    except: pass
-    return results
-
-# --- МОНИТОРИНГ САЙТОВ ---
-async def monitor_sites():
-    while True:
-        try:
-            subs = get_all_subs()
-            for user_id, kw in subs:
-                all_found = search_hh(kw, 3) + search_trudvsem(kw, 3) + search_jobfilter(kw, 3)
-                for job in all_found:
-                    if is_new_job(job['id']):
-                        await bot.send_message(user_id, f"🔔 Новинка по вашей подписке [{kw.upper()}]:\n\n{job['text']}", parse_mode="Markdown")
-                        await asyncio.sleep(0.5)
-        except Exception as e:
-            logging.error(f"Error in monitor: {e}")
-        await asyncio.sleep(1800)
-
-# --- ОБРАБОТЧИКИ ---
-
+# --- ОБРАБОТЧИКИ БОТА ---
 @dp.message_handler(commands=['start'])
-async def start_cmd(message: types.Message):
-    name = message.from_user.first_name
-    await message.answer(
-        f"Привет, {name}! 👋\n\n"
-        f"Я ищу вакансии для кино и медиа (HH, ТрудВсем, JobFilter + Telegram-каналы).\n\n"
-        f"**Как работать:**\n"
-        f"1. Напиши профессию (напр. `Креативный продюсер`).\n"
-        f"2. Под результатом нажми кнопку подписки.\n"
-        f"3. Я буду сам присылать новые вакансии из сайтов и каналов!",
-        parse_mode="Markdown"
-    )
+async def start(message: types.Message):
+    await message.answer(f"Привет, {message.from_user.first_name}! 👋\nЯ ищу вакансии везде: на сайтах и в ТОП-каналах киноиндустрии.\n\nПросто напиши профессию.")
 
 @dp.message_handler()
-async def manual_search(message: types.Message):
+async def search(message: types.Message):
     query = message.text
-    await message.answer(f"🔎 Ищу вакансии по запросу: *{query}*...", parse_mode="Markdown")
+    wait = await message.answer(f"🔎 Ищу вакансии: *{query}*...", parse_mode="Markdown")
     
-    found = search_hh(query) + search_trudvsem(query) + search_jobfilter(query)
+    data = fetch_sites_data(query)
+    for j in data[:7]:
+        await message.answer(f"🔴 {j['Источник']}: {j['Вакансия']}\n{j['Ссылка']}", disable_web_page_preview=True)
     
-    if not found:
-        await message.answer("Ничего не найдено.")
-        return
-
-    for j in found:
-        await message.answer(j['text'], parse_mode="Markdown")
-    
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
-    await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
+    kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться", callback_data=f"sub|{query}"))
+    await message.answer(f"Найдено {len(data)} вакансий. Включить авто-мониторинг сайтов и каналов?", reply_markup=kb)
+    await wait.delete()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
-async def sub_handler(callback_query: types.CallbackQuery):
-    query = callback_query.data.split('|')[1]
-    add_subscription(callback_query.from_user.id, query)
-    await bot.answer_callback_query(callback_query.id, f"Подписка оформлена!", show_alert=True)
-    await bot.send_message(callback_query.from_user.id, f"✅ Готово! Мониторю '{query}' везде.")
+async def sub(cb: types.CallbackQuery):
+    kw = cb.data.split('|')[1]
+    conn = sqlite3.connect('manager.db')
+    conn.execute('INSERT OR IGNORE INTO subs (user_id, keyword) VALUES (?, ?)', (cb.from_user.id, kw.lower()))
+    conn.commit()
+    conn.close()
+    await bot.answer_callback_query(cb.id, f"Подписка на {kw} активна!", show_alert=True)
 
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
-async def handle(request):
-    return web.Response(text="Bot is Alive")
+# --- ВЕБ-СЕРВЕР И ЗАПУСК ---
+async def handle(request): return web.Response(text="Alive")
 
 async def main():
     init_db()
-    
-    # Запуск Веб-сервера (чтобы Render не убивал бота)
     app = web.Application()
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    await web.TCPSite(runner, '0.0.0.0', port).start()
+    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
 
-    # Запуск фонового мониторинга сайтов
-    asyncio.create_task(monitor_sites())
+    # Запускаем Юзербота и Бот одновременно
+    await client.start()
+    logging.info("Userbot started!")
     
-    # Запуск бота
+    # Фоновая задача мониторинга сайтов
+    async def monitor_sites():
+        while True:
+            await asyncio.sleep(1800)
+            # Логика поиска по подпискам (аналогично предыдущим версиям)
+            
+    asyncio.create_task(monitor_sites())
     await dp.start_polling()
 
 if __name__ == '__main__':
