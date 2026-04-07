@@ -1,6 +1,7 @@
 aiogram==2.25.1
-aiohttp==3.8.5
+telethon
 requests
 beautifulsoup4
 pandas
 openpyxl
+aiohttp
