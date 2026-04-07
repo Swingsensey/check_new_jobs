@@ -80,20 +80,19 @@ def is_new_job(job_id):
     return False
 
 # --- ПАРСЕРЫ ---
-# --- ПАРСЕРЫ (ОБНОВЛЕННЫЕ) ---
 def search_hh(query, limit=100):
-    # Добавили per_page=100 и поиск по Москве
-    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page=100&order_by=publication_time"
+    # Поиск по Москве, 100 вакансий
+    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
     results = []
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10).json()
+        r = requests.get(url, headers=HEADERS, timeout=5).json()
         for v in r.get('items', []):
             sal = v.get('salary')
             pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
             results.append({
                 'id': f"hh_{v['id']}",
                 'Дата': v['published_at'][:10],
-                'Источник': 'HH.ru',
+                'Источник': 'HH',  # Короткое имя
                 'Вакансия': v['name'],
                 'Компания': v['employer']['name'],
                 'Оплата': pay,
@@ -102,11 +101,12 @@ def search_hh(query, limit=100):
     except: pass
     return results
 
-def search_trudvsem(query, limit=50):
+def search_trudvsem(query, limit=20):
     results = []
     try:
+        # API Работа России
         url = f"https://opendata.trudvsem.ru/api/v1/vacancies/region/77?text={query}"
-        r = requests.get(url, timeout=10).json()
+        r = requests.get(url, timeout=5).json()
         if r.get('results'):
             for v in r['results']['vacancies'][:limit]:
                 vac = v['vacancy']
