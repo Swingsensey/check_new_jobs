@@ -11,11 +11,31 @@ from bs4 import BeautifulSoup
 from aiohttp import web
 from datetime import datetime
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
 API_ID = 23009673
 API_HASH = '249328ef42a91e5c80102c3d73c76a9c'
+SESSION_STR = os.getenv('TELEGRAM_SESSION')
+# Список каналов БЕЗ собаки @
+CHANNELS = [
+    # Твой основной список
+    'vdhl_good', 'mediajobs_ru', 'kinorabochie', 'gigs_for_creatives', 
+    'ru_tvjobs', 'work_in_media', 'promofox', 'creative_jobs',
+    
+    # Твой дополнительный список
+    'moviestart_ru', 'se_cinema', 'grushamedia', 'teletet', 
+    'cinemapeople', 'my_casting',
+    
+    # ТОП-3 дополнения для коммерческого режима и продакшна (рекомендую!)
+    'distantsiya',           # Дистанция (огромный канал с креативом)
+    'rabota_v_production',   # Работа в продакшне (самое мясо по съемкам)
+    'v_kadre_za_kadrom'      # В кадре и за кадром (вакансии съемочных групп)
+]
+
+# Создаем клиента для чтения каналов
+client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 # Список каналов для мониторинга (добавь свои)
 CHANNELS = ['@vdhl_good', '@mediajobs_ru', '@kinorabochie', '@gigs_for_creatives']
@@ -104,6 +124,37 @@ def search_jobfilter(query, limit=5):
     except: pass
     return results
 
+@client.on(events.NewMessage(chats=CHANNELS))
+async def telethon_handler(event):
+    text = event.message.message
+    if not text:
+        return
+
+    # Получаем все подписки из базы
+    subs = get_all_subs()
+    
+    # Проверяем, есть ли ключевое слово в тексте сообщения
+    matched_users = []
+    text_lower = text.lower()
+    for user_id, keyword in subs:
+        if keyword in text_lower:
+            matched_users.append(user_id)
+            
+    if matched_users:
+        # Генерируем уникальный ID для сообщения, чтобы не дублировать
+        job_id = f"tg_{event.chat_id}_{event.id}"
+        if is_new_job(job_id):
+            # Получаем название канала
+            chat = await event.get_chat()
+            chat_title = getattr(chat, 'title', 'Telegram Канал')
+            
+            for uid in set(matched_users):
+                try:
+                    msg = f"⚡️ **ГОРЯЧАЯ ВАКАНСИЯ ИЗ КАНАЛА: {chat_title}**\n\n{text[:3500]}"
+                    await bot.send_message(uid, msg, parse_mode="Markdown")
+                except:
+                    pass
+
 # --- МОНИТОРИНГ САЙТОВ ---
 async def monitor_sites():
     while True:
@@ -125,12 +176,17 @@ async def monitor_sites():
 async def start_cmd(message: types.Message):
     name = message.from_user.first_name
     await message.answer(
-        f"Привет, {name}! 👋\n\n"
-        f"Я ищу вакансии для кино и медиа (HH, ТрудВсем, JobFilter + Telegram-каналы).\n\n"
-        f"**Как работать:**\n"
-        f"1. Напиши профессию (напр. `Креативный продюсер`).\n"
-        f"2. Под результатом нажми кнопку подписки.\n"
-        f"3. Я буду сам присылать новые вакансии из сайтов и каналов!",
+        f"Привет, {name}! 🎬 Я — твой персональный агент по поиску работы в кино и медиа.\n\n"
+        f"**Что я умею:**\n"
+        f"🔍 **Мгновенный поиск:** Напиши название профессии, и я тут же перерою HH.ru, ТрудВсем и JobFilter.\n"
+        f"📂 **Excel-отчеты:** На каждый запрос я присылаю файл с 50 свежими вакансиями.\n"
+        f"⚡ **Live-мониторинг:** Я читаю 17+ элитных Telegram-каналов (*VDHL, Кинорабочие, Gigs for Creatives* и др.) в реальном времени.\n\n"
+        f"**Как запустить авто-поиск:**\n"
+        f"1️⃣ Напиши ключевое слово, например: `режиссер` или `продюсер`.\n"
+        f"2️⃣ Под результатом поиска нажми кнопку **«🔔 Подписаться»**.\n"
+        f"3️⃣ Всё! Как только в каналах или на сайтах появится вакансия с этим словом — я мгновенно пришлю её тебе в личку.\n\n"
+        f"💡 **Совет:** Подписывайся на короткие слова (например, `режиссер`), чтобы я ловил все склонения: *«ищем режиссера»*, *«нужны режиссеры»*.\n\n"
+        f"Что ищем сегодня?",
         parse_mode="Markdown"
     )
 
@@ -179,6 +235,9 @@ async def main():
     
     # Запуск бота
     await dp.start_polling()
+    # Запускаем чтение каналов
+    await client.start()
+    logging.info("Мониторинг Telegram-каналов запущен!")
 
 if __name__ == '__main__':
     asyncio.run(main())
