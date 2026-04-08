@@ -166,33 +166,29 @@ def search_jobfilter(query, limit=5):
     except: pass
     return results
 
-@client.on(events.NewMessage())
+@client.on(events.NewMessage()) # ОСТАВЬ СКОБКИ ПУСТЫМИ!
 async def telethon_handler(event):
     try:
-        # Получаем имя канала
         chat = await event.get_chat()
         username = getattr(chat, 'username', None)
         
-        # Если канала нет в нашем списке — игнорируем
+        # Фильтруем только нужные каналы здесь, чтобы не было ошибок
         if not username or username not in CHANNELS:
             return
 
         text = event.message.message
         if not text: return
 
-        # Проверяем подписки пользователей
         subs = get_all_subs()
         matched_users = [user_id for user_id, kw in subs if kw in text.lower()]
         
         if matched_users:
-            job_id = f"tg_{event.chat_id}_{event.id}"
-            if is_new_job(job_id):
+            if is_new_job(f"tg_{event.chat_id}_{event.id}"):
                 for uid in set(matched_users):
                     try:
-                        await bot.send_message(uid, f"⚡️ **ГОРЯЧАЯ ВАКАНСИЯ: {getattr(chat, 'title', 'Канал')}**\n\n{text[:3500]}")
+                        await bot.send_message(uid, f"⚡️ **КАНАЛ: {getattr(chat, 'title', 'Media')}**\n\n{text[:3500]}")
                     except: pass
-    except Exception as e:
-        logging.error(f"Ошибка в мониторинге каналов: {e}")
+    except: pass
 
 def generate_excel(data):
     # Метод теперь просто оформляет таблицу из уже найденных вакансий
