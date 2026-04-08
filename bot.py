@@ -269,27 +269,42 @@ async def start_cmd(message: types.Message):
 @dp.message_handler()
 async def manual_search(message: types.Message):
     query = message.text
-    await message.answer(f"🔎 Ищу вакансии по запросу: *{query}*...", parse_mode="Markdown")
+    # 1. Сообщение о начале поиска
+    wait = await message.answer(f"🔎 Ищу вакансии по запросу: *{query}*...", parse_mode="Markdown")
     
-    found = search_hh(query) + search_trudvsem(query) + search_jobfilter(query)
+    # 2. Сбор данных (собираем всё в один список)
+    # Используем лимиты: HH (100), SuperJob (50), JobFilter (10)
+    hh_res = search_hh(query, 100)
+    sj_res = search_superjob(query, 50) 
+    jf_res = search_jobfilter(query, 10)
+    found = hh_res + sj_res + jf_res
     
     if not found:
-        await message.answer("Ничего не найдено.")
+        await wait.edit_text("Ничего не найдено. Попробуй изменить запрос.")
         return
 
-    for j in found:
-        await message.answer(j['text'], parse_mode="Markdown")
-    
+    # 3. Выдача в Телеграм (ТОТ САМЫЙ ЧИСТЫЙ СТИЛЬ: Текст + Ссылка)
+    # Выводим первые 10 самых свежих вакансий
+    for j in found[:10]:
+        await message.answer(j['text'], disable_web_page_preview=True)
+        await asyncio.sleep(0.1) # Короткая пауза для стабильности
+
+    # 4. ГЕНЕРАЦИЯ И ОТПРАВКА EXCEL (Твой синий отчет)
+    # Мы передаем весь список 'found' (там 100+ вакансий)
+    excel_file = generate_excel(found) 
+    if excel_file:
+        await message.answer_document(
+            types.InputFile(excel_file, filename=f"{query.replace(' ', '_')}.xlsx"),
+            caption=f"📊 Полный отчет по запросу '{query}' (HH + SJ + JF)"
+        )
+
+    # 5. Кнопка подписки
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
     await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
-    # ДОПОЛНИТЕЛЬНЫЙ ВЫЗОВ EXCEL (НЕ ТРОГАЯ ТВОЙ КОД ВЫШЕ)
-    excel_file = generate_pro_excel(query)
-    if excel_file:
-        await message.answer_document(
-            types.InputFile(excel_file, filename=f"{query}.xlsx"),
-            caption=f"📊 Полный отчет по запросу '{query}' (100+ вакансий)"
-        )
+    
+    # Убираем сервисное сообщение "Ищу..."
+    await wait.delete()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
 async def sub_handler(callback_query: types.CallbackQuery):
