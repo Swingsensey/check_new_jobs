@@ -96,33 +96,21 @@ def search_hh(query, limit=5):
     return results
 
 def search_superjob(query, limit=50):
-    if not SUPERJOB_KEY:
-        return []
-        
-    # Москва ID = 4
+    if not SJ_KEY: return [] # Здесь исправили имя переменной
     url = f"https://api.superjob.ru/2.0/vacancies/?keyword={query}&town=4&count={limit}"
-    headers = {'X-Api-App-Id': SUPERJOB_KEY}
+    headers = {'X-Api-App-Id': SJ_KEY}
     results = []
-    
     try:
         r = requests.get(url, headers=headers, timeout=10).json()
         for v in r.get('objects', []):
-            pay = "Договорная"
-            if v.get('payment_from') or v.get('payment_to'):
-                pay = f"от {v.get('payment_from', 0)} до {v.get('payment_to', 0)}"
-            
+            pay = f"от {v.get('payment_from')}" if v.get('payment_from') else "Договорная"
             results.append({
                 'id': f"sj_{v['id']}",
-                'text': f"🔵 SuperJob: {v['profession']}\n{v['link']}", # Твой стиль!
+                'text': f"🔵 SJ: {v['profession']}\n{v['link']}",
                 'Дата': datetime.fromtimestamp(v['date_published']).strftime('%Y-%m-%d'),
-                'Источник': 'SuperJob',
-                'Вакансия': v['profession'],
-                'Компания': v['client'].get('title', 'Не указана'),
-                'Оплата': pay,
-                'Ссылка': v['link']
+                'Источник': 'SuperJob', 'Вакансия': v['profession'], 'Компания': v['client'].get('title', '—'), 'Оплата': pay, 'Ссылка': v['link']
             })
-    except Exception as e:
-        logging.error(f"SuperJob error: {e}")
+    except: pass
     return results
 
 def search_habr(query, limit=20):
@@ -300,9 +288,9 @@ async def start_cmd(message: types.Message):
     await message.answer(
         f"Привет, {name}! 🎬 Я — твой персональный агент по поиску работы в кино и медиа.\n\n"
         f"**Что я умею:**\n"
-        f"🔍 **Мгновенный поиск:** Напиши название профессии, и я тут же перерою HH.ru, ТрудВсем и JobFilter.\n"
+        f"🔍 **Мгновенный поиск:** Напиши название профессии, и я тут же перерою HH.ru, SuperJob, Habr и JobFilter.\n"
         f"📂 **Excel-отчеты:** На каждый запрос я присылаю файл с 50 свежими вакансиями.\n"
-        f"⚡ **Live-мониторинг:** Я читаю 17+ элитных Telegram-каналов (*VDHL, Кинорабочие, Gigs for Creatives* и др.) в реальном времени.\n\n"
+        f"⚡️ **Live-мониторинг:** Я читаю Telegram-каналы в реальном времени.\n\n"
         f"**Как запустить авто-поиск:**\n"
         f"1️⃣ Напиши ключевое слово, например: `режиссер` или `продюсер`.\n"
         f"2️⃣ Под результатом поиска нажми кнопку **«🔔 Подписаться»**.\n"
