@@ -363,27 +363,35 @@ async def start_cmd(message: types.Message):
 
 @dp.message_handler(commands=['mysubs'])
 async def list_subs(message: types.Message):
-    conn = sqlite3.connect('manager.db')
-    data = conn.execute('SELECT keyword FROM subs WHERE user_id = ?', (message.from_user.id,)).fetchall()
-    conn.close()
-    
-    if not data:
-        await message.answer(
-            "У тебя пока нет активных подписок. 🤷‍♂️\n\n"
-            "Чтобы подписаться: напиши профессию (например, `продюсер`) и нажми кнопку «Подписаться» под результатами поиска.",
-            parse_mode="Markdown"
-        )
-    else:
-        # Формируем красивый список с галочками
-        subs_list = "\n".join([f"✅ `{row[0]}`" for row in data])
-        text = (
-            "🔔 **Твои активные подписки:**\n\n"
-            f"{subs_list}\n\n"
-            "--- \n"
-            "🗑 Чтобы удалить одну: напиши `/del слово` (напр. `/del продюсер`)\n"
-            "🛑 Чтобы удалить все сразу: нажми /stop_all"
-        )
-        await message.answer(text, parse_mode="Markdown")
+    try:
+        # Подключаемся к базе
+        conn = sqlite3.connect('manager.db')
+        # Проверяем наличие таблицы, чтобы не было вылета
+        conn.execute('CREATE TABLE IF NOT EXISTS subs (user_id INTEGER, keyword TEXT, UNIQUE(user_id, keyword))')
+        
+        data = conn.execute('SELECT keyword FROM subs WHERE user_id = ?', (message.from_user.id,)).fetchall()
+        conn.close()
+        
+        if not data:
+            await message.answer(
+                "У тебя пока нет активных подписок. 🤷‍♂️\n\n"
+                "Напиши профессию и нажми кнопку «Подписаться» под результатами поиска.",
+                parse_mode="Markdown"
+            )
+        else:
+            # Используем экранирование, чтобы Markdown не ломался от спецсимволов
+            subs_list = "\n".join([f"✅ `{str(row[0])}`" for row in data])
+            text = (
+                "🔔 **Твои активные подписки:**\n\n"
+                f"{subs_list}\n\n"
+                "---\n"
+                "🗑 Чтобы удалить: `/del слово`"
+            )
+            await message.answer(text, parse_mode="Markdown")
+            
+    except Exception as e:
+        logging.error(f"Ошибка в mysubs: {e}")
+        await message.answer("⚠ Ошибка при чтении списка подписок. Попробуй позже.")
 
 @dp.message_handler(commands=['del'])
 async def del_sub(message: types.Message):
