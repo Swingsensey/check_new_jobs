@@ -170,10 +170,18 @@ def search_jobfilter(query, limit=5):
         items = soup.find_all('div', class_='vacancy_item') or soup.find_all('div', class_='vacancy-item')
         for i in items[:limit]:
             a = i.find('a')
-            results.append({
-                'id': f"jf_{a['href']}",
-                'text': f"🌐 **JF: {a.text.strip()}**\nhttps://jobfilter.ru{a['href']}"
-            })
+            if a:
+                link = "https://jobfilter.ru" + a['href'] if not a['href'].startswith('http') else a['href']
+                results.append({
+                    'id': f"jf_{a['href'][-10:]}",
+                    'text': f"🌐 JF: {a.text.strip()}\n{link}",
+                    'Дата': datetime.now().strftime('%Y-%m-%d'), # Добавили поле
+                    'Источник': 'JobFilter', # Добавили поле
+                    'Вакансия': a.text.strip(), # Добавили поле
+                    'Компания': '—', # Добавили поле
+                    'Оплата': 'См. на сайте', # Добавили поле
+                    'Ссылка': link
+                })
     except: pass
     return results
 
@@ -204,19 +212,23 @@ async def telethon_handler(event):
         pass
 
 def generate_excel(data):
-    # Метод теперь просто оформляет таблицу из уже найденных вакансий
     try:
         raw_data = []
         for item in data:
+            # Используем .get(), чтобы бот не падал, если поля нет
             raw_data.append({
-                'Дата': item['Дата'], 'Источник': item['Источник'],
-                'Вакансия': item['Вакансия'], 'Компания': item['Компания'],
-                'Оплата': item['Оплата'], 'Ссылка': item['Ссылка']
+                'Дата': item.get('Дата', '—'),
+                'Источник': item.get('Источник', '—'),
+                'Вакансия': item.get('Вакансия', '—'),
+                'Компания': item.get('Компания', '—'),
+                'Оплата': item.get('Оплата', '—'),
+                'Ссылка': item.get('Ссылка', '—')
             })
 
         df = pd.DataFrame(raw_data)
-        df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
-        df = df.sort_values(by='Дата', ascending=False)
+        if not df.empty and 'Дата' in df.columns:
+            df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
+            df = df.sort_values(by='Дата', ascending=False)
         
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -234,20 +246,6 @@ def generate_excel(data):
     except Exception as e:
         logging.error(f"Excel error: {e}")
         return None
-
-async def monitor_sites():
-    while True:
-        try:
-            subs = get_all_subs()
-            for user_id, kw in subs:
-                # Проверяем по 3 штуки из каждого ТОП источника
-                all_found = search_hh(kw, 3) + search_superjob(kw, 3) + search_habr(kw, 3)
-                for job in all_found:
-                    if is_new_job(job['id']):
-                        await bot.send_message(user_id, f"🔔 Новинка по подписке [{kw.upper()}]:\n\n{job['text']}")
-                        await asyncio.sleep(0.5)
-        except: pass
-        await asyncio.sleep(1800)
 
 # --- ОБРАБОТЧИКИ ---
 
@@ -274,7 +272,7 @@ async def manual_search(message: types.Message):
     query = message.text
     wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # Сбор данных с защитой
+    # Сбор данных
     hh, sj, hb, jf = [], [], [], []
     try: hh = search_hh(query, 100)
     except: pass
@@ -292,13 +290,14 @@ async def manual_search(message: types.Message):
         return
 
     # 1. Твой стиль ссылок (Топ-10)
-    # Берем срез, чтобы в топе были разные сайты
     top_mix = hh[:5] + sj[:3] + hb[:2]
     for j in top_mix:
-        await message.answer(j['text'], disable_web_page_preview=True)
-        await asyncio.sleep(0.1)
+        try:
+            await message.answer(j['text'], disable_web_page_preview=True)
+            await asyncio.sleep(0.1)
+        except: pass
 
-    # 2. Твой идеальный Excel
+    # 2. Идеальный синий Excel
     excel_file = generate_excel(all_found)
     if excel_file:
         await message.answer_document(
@@ -310,9 +309,6 @@ async def manual_search(message: types.Message):
     kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться", callback_data=f"sub|{query}"))
     await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
     await wait.delete()
-
-async def main():
-    init_db()
     
     # 1. Запуск Веб-сервера
     app = web.Application(); app.router.add_get('/', handle)
