@@ -22,7 +22,7 @@ SESSION_STR = os.getenv('TELEGRAM_SESSION')
 SJ_KEY = os.getenv('SUPERJOB_KEY') # Твой новый ключ
 # Список каналов БЕЗ собаки @
 CHANNELS = [
-    'vdhl_good', 'mediajobs_ru', 'kinorabochie', 'gigs_for_creatives', 
+    'vdhl_good', 'mediajobs_ru', 'gigs_for_creatives', 
     'ru_tvjobs', 'work_in_media', 'promofox', 'creative_jobs',
     'moviestart_ru', 'se_cinema', 'grushamedia', 'teletet', 
     'cinemapeople', 'my_casting', 'distantsiya', 'rabota_v_production', 'v_kadre_za_kadrom'
@@ -199,45 +199,37 @@ async def telethon_handler(event):
                 except:
                     pass
 
-def generate_excel(query):
-    raw_data = []
-    
-    # Собираем данные со всех движков
-    hh = search_hh(query, 100)
-    sj = search_superjob(query, 50)
-    hb = search_habr(query, 20)
-    jf = search_jobfilter(query, 10)
-    
-    # Объединяем чистые данные (без поля 'text')
-    for source in [hh, sj, hb, jf]:
-        for item in source:
-            # Копируем всё кроме 'text' и 'id' для таблицы
+def generate_excel(data):
+    # Метод теперь просто оформляет таблицу из уже найденных вакансий
+    try:
+        raw_data = []
+        for item in data:
             raw_data.append({
                 'Дата': item['Дата'], 'Источник': item['Источник'],
                 'Вакансия': item['Вакансия'], 'Компания': item['Компания'],
                 'Оплата': item['Оплата'], 'Ссылка': item['Ссылка']
             })
 
-    if not raw_data: return None
-
-    df = pd.DataFrame(raw_data)
-    df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
-    df = df.sort_values(by='Дата', ascending=False)
-    
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Вакансии')
-        ws = writer.sheets['Вакансии']
-        fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
-        font = Font(color="FFFFFF", bold=True)
-        for col_num, value in enumerate(df.columns.values):
-            cell = ws.cell(row=1, column=col_num + 1)
-            cell.fill = fill; cell.font = font
-            cell.alignment = Alignment(horizontal='center')
-            ws.column_dimensions[chr(65 + col_num)].width = 35
-        ws.freeze_panes = 'A2'
-    output.seek(0)
-    return output
+        df = pd.DataFrame(raw_data)
+        df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
+        df = df.sort_values(by='Дата', ascending=False)
+        
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Вакансии')
+            ws = writer.sheets['Вакансии']
+            fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
+            font = Font(color="FFFFFF", bold=True)
+            for col_num in range(len(df.columns)):
+                cell = ws.cell(row=1, column=col_num + 1)
+                cell.fill = fill; cell.font = font
+                ws.column_dimensions[chr(65 + col_num)].width = 35
+            ws.freeze_panes = 'A2'
+        output.seek(0)
+        return output
+    except Exception as e:
+        logging.error(f"Excel error: {e}")
+        return None
 
 async def monitor_sites():
     while True:
@@ -278,43 +270,42 @@ async def manual_search(message: types.Message):
     query = message.text
     wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # Сбор данных
-    hh_res = search_hh(query, 100)
-    sj_res = search_superjob(query, 50)
-    hb_res = search_habr(query, 20)
-    jf_res = search_jobfilter(query, 10)
+    # Сбор данных ОДИН раз
+    hh = search_hh(query, 100)
+    sj = search_superjob(query, 50)
+    hb = search_habr(query, 20)
+    jf = search_jobfilter(query, 10)
     
-    all_found = hh_res + sj_res + hb_res + jf_res
+    all_found = hh + sj + hb + jf
     
     if not all_found:
-        await wait.edit_text("Ничего не найдено.")
+        await wait.edit_text("Ничего не найдено по этому слову.")
         return
 
-    # 1. Выдача 10 ссылок (с датой и ЗП)
-    for j in all_found[:10]:
-        await message.answer(j['text'], disable_web_page_preview=True)
+    # 1. Твой эталонный стиль в Телеграм (только важные 10 ссылок)
+    # Берем срез из разных источников для разнообразия
+    top_mix = hh[:5] + sj[:3] + hb[:2]
+    
+    for j in top_mix:
+        # Чистый формат: Иконка + Источник + Название + Ссылка
+        icon = "🔴" if "HH" in j['Источник'] else "🔵" if "SJ" in j['Источник'] else "🟢"
+        msg = f"{icon} {j['Источник']}: {j['Вакансия']}\n{j['Ссылка']}"
+        await message.answer(msg, disable_web_page_preview=True)
         await asyncio.sleep(0.1)
 
-    # 2. Выдача Excel (Синий, красивый)
+    # 2. Мгновенная выдача Excel (теперь он не висит)
     excel_file = generate_excel(all_found)
     if excel_file:
         await message.answer_document(
             types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"📊 Полный отчет по '{query}'"
+            caption=f"📊 Полный отчет по запросу '{query}' (все источники)"
         )
 
     # 3. Кнопка подписки
     kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
-    await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
+    await message.answer(f"Хочешь получать уведомления о новых вакансиях '{query}'?", reply_markup=kb)
+    
     await wait.delete()
-
-@dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
-async def sub_handler(callback_query: types.CallbackQuery):
-    query = callback_query.data.split('|')[1]
-    add_subscription(callback_query.from_user.id, query)
-    await bot.answer_callback_query(callback_query.id, f"Подписка оформлена!", show_alert=True)
-    await bot.send_message(callback_query.from_user.id, f"✅ Готово! Мониторю '{query}' везде.")
-
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request):
     return web.Response(text="Bot is Alive")
