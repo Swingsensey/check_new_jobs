@@ -211,43 +211,98 @@ def search_jobfilter(query, limit=5):
     return results
 
 @client.on(events.NewMessage(chats=CHANNELS))
+@client.on(events.NewMessage(chats=CHANNELS))
 async def telethon_handler(event):
     try:
-        # Получаем данные о чате максимально безопасно
-        chat = await event.get_chat()
-        username = getattr(chat, 'username', None)
-        
-        if not username or username not in CHANNELS:
-            return
-
+        # 1. Получаем текст и приводим к нижнему регистру + убираем ё
         text = event.message.message
         if not text: return
+        text_for_search = text.lower().replace('ё', 'е')
 
+        # 2. Получаем данные о канале
+        chat = await event.get_chat()
+        title = getattr(chat, 'title', 'Media Channel')
+        username = getattr(chat, 'username', 'channel')
+
+        # 3. Проверяем подписки
         subs = get_all_subs()
-        matched_users = [user_id for user_id, kw in subs if kw in text.lower()]
+        matched_users = []
+        
+        for user_id, kw in subs:
+            # Сравниваем ключевое слово (тоже без ё) с текстом поста
+            if kw.lower().replace('ё', 'е') in text_for_search:
+                matched_users.append(user_id)
         
         if matched_users:
+            # 4. Проверка на дубликаты (чтобы не слать одно и то же)
             if is_new_job(f"tg_{event.chat_id}_{event.id}"):
+                # Формируем прямую ссылку на пост
+                post_url = f"https://t.me/{username}/{event.id}" if username else "Ссылка скрыта"
+                
                 for uid in set(matched_users):
                     try:
-                        await bot.send_message(uid, f"⚡️ **КАНАЛ: {getattr(chat, 'title', 'Media')}**\n\n{text[:3500]}")
+                        # 5. Отправляем сообщение с заголовком и ссылкой в конце
+                        await bot.send_message(
+                            uid, 
+                            f"⚡️ **НОВОЕ В КАНАЛЕ: {title}**\n\n"
+                            f"{text[:3500]}\n\n"
+                            f"🔗 **Оригинал поста:** {post_url}",
+                            disable_web_page_preview=False # Оставляем превью для удобства
+                        )
+                        await asyncio.sleep(0.3) # Защита от Flood Limit
                     except: pass
     except Exception as e:
-        # Если канал не распознан, просто молчим и работаем дальше
-        pass
-
+        logging.error(f"Ошибка в telethon_handler: {e}")
+        
 async def monitor_sites():
     while True:
         try:
-            subs = get_all_subs()
+            logging.info("Запуск циклической проверки сайтов...")
+            subs = get_all_subs() # Получаем список [(user_id, keyword), ...]
+            
+            if not subs:
+                logging.info("Подписок пока нет. Спим.")
+                await asyncio.sleep(600)
+                continue
+
             for user_id, kw in subs:
-                # Мониторим HH (3 шт) и SJ (3 шт)
-                all_found = search_hh(kw, 3) + search_superjob(kw, 3)
-                for job in all_found:
-                    if is_new_job(job['id']):
-                        await bot.send_message(user_id, f"🔔 Новинка по подписке [{kw.upper()}]:\n\n{job['text']}")
-                        await asyncio.sleep(0.5)
-        except: pass
+                # 1. Собираем свежак с 3-х главных сайтов (по 15 штук)
+                # Habr и JobFilter тоже можно добавить, если нужно
+                hh = search_hh(kw, 15)
+                sj = search_superjob(kw, 15)
+                hb = search_habr(kw, 10) 
+
+                all_current_jobs = hh + sj + hb
+                
+                # Нормализуем ключевое слово для проверки (е/ё)
+                kw_clean = kw.lower().replace('ё', 'е')
+
+                for job in all_current_jobs:
+                    # 2. Проверяем, подходит ли вакансия под ключевое слово (на всякий случай)
+                    # и не присылали ли мы её уже раньше (is_new_job)
+                    job_text_clean = job['text'].lower().replace('ё', 'е')
+                    
+                    if kw_clean in job_text_clean:
+                        if is_new_job(job['id']):
+                            try:
+                                # 3. Отправляем пользователю
+                                await bot.send_message(
+                                    user_id, 
+                                    f"🔔 **НОВАЯ ВАКАНСИЯ ПО ПОДПИСКЕ**\n"
+                                    f"🔍 Запрос: `{kw.upper()}`\n\n"
+                                    f"{job['text']}"
+                                )
+                                # Небольшая пауза, чтобы не поймать Flood Limit от Telegram
+                                await asyncio.sleep(0.7)
+                            except Exception as send_error:
+                                logging.error(f"Ошибка отправки сообщения юзеру {user_id}: {send_error}")
+            
+            logging.info("Проверка завершена. Следующий запуск через 30 минут.")
+            
+        except Exception as e:
+            logging.error(f"Критическая ошибка в monitor_sites: {e}")
+            
+        # Ждем 30 минут (1800 секунд) перед следующей проверкой
         await asyncio.sleep(1800)
 
 def generate_excel(data):
@@ -420,7 +475,7 @@ async def main(): # НИКАКИХ ОТСТУПОВ ПЕРЕД async
 
     # 3. Бот
     # Если функции monitor_sites нет, закомментируй строку ниже:
-    # asyncio.create_task(monitor_sites()) 
+    asyncio.create_task(monitor_sites()) 
     await dp.start_polling()
 
 if __name__ == '__main__':
