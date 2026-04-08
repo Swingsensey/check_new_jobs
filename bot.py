@@ -320,11 +320,11 @@ async def main():
     await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
 
     # 2. Запуск мониторинга каналов (с защитой от вылета)
-    try:
-        await client.start()
-        logging.info("Мониторинг каналов запущен!")
-    except Exception as e:
-        logging.error(f"Telethon не смог запуститься: {e}")
+    #try:
+        #await client.start()
+        #logging.info("Мониторинг каналов запущен!")
+    #except Exception as e:
+        #logging.error(f"Telethon не смог запуститься: {e}")
 
     # 3. Фоновые задачи и Бот
     asyncio.create_task(monitor_sites())
