@@ -351,7 +351,7 @@ async def handle(request):
 async def main():
     init_db()
     
-    # Запуск Веб-сервера (чтобы Render не убивал бота)
+    # 1. Запуск Веб-сервера (для Render)
     app = web.Application()
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
@@ -359,14 +359,16 @@ async def main():
     port = int(os.environ.get("PORT", 8080))
     await web.TCPSite(runner, '0.0.0.0', port).start()
 
-    # Запуск фонового мониторинга сайтов
-    asyncio.create_task(monitor_sites())
-    
-    # Запуск бота
-    await dp.start_polling()
-    # Запускаем чтение каналов
+    # 2. Запускаем чтение каналов (ДОЛЖНО БЫТЬ ПЕРЕД БОТОМ)
     await client.start()
     logging.info("Мониторинг Telegram-каналов запущен!")
+
+    # 3. Запуск фонового мониторинга сайтов
+    asyncio.create_task(monitor_sites())
+    
+    # 4. Запуск бота (ЭТА СТРОКА ВСЕГДА ПОСЛЕДНЯЯ)
+    logging.info("Бот запущен и слушает сообщения...")
+    await dp.start_polling()
 
 if __name__ == '__main__':
     asyncio.run(main())
