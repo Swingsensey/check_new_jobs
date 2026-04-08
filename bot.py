@@ -19,6 +19,7 @@ TOKEN = os.getenv('BOT_TOKEN')
 API_ID = 23009673
 API_HASH = '249328ef42a91e5c80102c3d73c76a9c'
 SESSION_STR = os.getenv('TELEGRAM_SESSION')
+SJ_KEY = os.getenv('SUPERJOB_KEY') # Твой новый ключ
 # Список каналов БЕЗ собаки @
 CHANNELS = [
     # Твой основной список
@@ -94,19 +95,34 @@ def search_hh(query, limit=5):
     except: pass
     return results
 
-def search_trudvsem(query, limit=5):
+def search_superjob(query, limit=50):
+    if not SUPERJOB_KEY:
+        return []
+        
+    # Москва ID = 4
+    url = f"https://api.superjob.ru/2.0/vacancies/?keyword={query}&town=4&count={limit}"
+    headers = {'X-Api-App-Id': SUPERJOB_KEY}
     results = []
+    
     try:
-        url = f"https://opendata.trudvsem.ru/api/v1/vacancies/region/77?text={query}"
-        r = requests.get(url, timeout=10).json()
-        if r.get('results'):
-            for v in r['results']['vacancies'][:limit]:
-                vac = v['vacancy']
-                results.append({
-                    'id': f"tr_{vac['id']}",
-                    'text': f"🔵 **ТрудВсем: {vac['job-name']}**\n{vac['vac_url']}"
-                })
-    except: pass
+        r = requests.get(url, headers=headers, timeout=10).json()
+        for v in r.get('objects', []):
+            pay = "Договорная"
+            if v.get('payment_from') or v.get('payment_to'):
+                pay = f"от {v.get('payment_from', 0)} до {v.get('payment_to', 0)}"
+            
+            results.append({
+                'id': f"sj_{v['id']}",
+                'text': f"🔵 SuperJob: {v['profession']}\n{v['link']}", # Твой стиль!
+                'Дата': datetime.fromtimestamp(v['date_published']).strftime('%Y-%m-%d'),
+                'Источник': 'SuperJob',
+                'Вакансия': v['profession'],
+                'Компания': v['client'].get('title', 'Не указана'),
+                'Оплата': pay,
+                'Ссылка': v['link']
+            })
+    except Exception as e:
+        logging.error(f"SuperJob error: {e}")
     return results
 
 def search_jobfilter(query, limit=5):
