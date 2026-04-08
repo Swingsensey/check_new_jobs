@@ -452,6 +452,45 @@ async def sub_handler(cb: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Subscription error: {e}")
         await bot.answer_callback_query(cb.id, text="❌ Произошла ошибка при подписке.")
+
+# 1. Посмотреть свои подписки
+@dp.message_handler(commands=['mysubs'])
+async def list_subs(message: types.Message):
+    conn = sqlite3.connect('manager.db')
+    data = conn.execute('SELECT keyword FROM subs WHERE user_id = ?', (message.from_user.id,)).fetchall()
+    conn.close()
+    
+    if not data:
+        await message.answer("У тебя пока нет активных подписок. Напиши профессию и нажми «Подписаться».")
+    else:
+        text = "🔔 **Твои активные подписки:**\n\n"
+        for row in data:
+            text += f"• {row[0]}\n"
+        text += "\nЧтобы удалить подписку, напиши: `/del слово`"
+        await message.answer(text, parse_mode="Markdown")
+
+# 2. Удалить конкретную подписку
+@dp.message_handler(commands=['del'])
+async def del_sub(message: types.Message):
+    keyword = message.get_args().lower()
+    if not keyword:
+        await message.answer("Пример команды: `/del режиссер`", parse_mode="Markdown")
+        return
+        
+    conn = sqlite3.connect('manager.db')
+    conn.execute('DELETE FROM subs WHERE user_id = ? AND keyword = ?', (message.from_user.id, keyword))
+    conn.commit()
+    conn.close()
+    await message.answer(f"❌ Подписка на '{keyword}' удалена.")
+
+# 3. Полная очистка памяти (удалить всё)
+@dp.message_handler(commands=['stop_all'])
+async def clear_subs(message: types.Message):
+    conn = sqlite3.connect('manager.db')
+    conn.execute('DELETE FROM subs WHERE user_id = ?', (message.from_user.id,))
+    conn.commit()
+    conn.close()
+    await message.answer("📴 Все подписки удалены. Бот больше не будет присылать уведомления.")
     
 async def handle(request): # Добавь это, чтобы веб-сервер работал
     return web.Response(text="OK")
