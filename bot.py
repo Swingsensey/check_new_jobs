@@ -361,6 +361,35 @@ async def manual_search(message: types.Message):
     await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
     
     await wait.delete()
+
+# --- ОБРАБОТЧИК КНОПКИ ПОДПИСКИ ---
+@dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
+async def sub_handler(cb: types.CallbackQuery):
+    # 1. Извлекаем ключевое слово из даты кнопки
+    kw = cb.data.split('|')[1]
+    user_id = cb.from_user.id
+    
+    try:
+        # 2. Записываем в базу данных
+        add_subscription(user_id, kw)
+        
+        # 3. Отправляем всплывающее уведомление (alert)
+        await bot.answer_callback_query(
+            cb.id, 
+            text=f"✅ Подписка на '{kw}' оформлена!", 
+            show_alert=True
+        )
+        
+        # 4. Отправляем подтверждающее сообщение в чат
+        await bot.send_message(
+            user_id, 
+            f"🔔 **Готово!**\n\nЯ запомнил запрос: `{kw}`.\n"
+            f"Как только в каналах или на сайтах появится новая вакансия с этим словом, я мгновенно пришлю её тебе сюда."
+        )
+        
+    except Exception as e:
+        logging.error(f"Subscription error: {e}")
+        await bot.answer_callback_query(cb.id, text="❌ Произошла ошибка при подписке.")
     
 async def handle(request): # Добавь это, чтобы веб-сервер работал
     return web.Response(text="OK")
