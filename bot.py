@@ -316,7 +316,7 @@ async def manual_search(message: types.Message):
     try: tg_hist = await search_telegram_history(query, limit_per_channel=5)
     except: pass
 
-    hh, sj, hb, jf = [], [], [], [], []
+    hh, sj, hb, jf = [], [], [], []
     try: hh = search_hh(query, 80)
     except: pass
     try: sj = search_superjob(query, 40)
