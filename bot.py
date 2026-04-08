@@ -22,18 +22,10 @@ SESSION_STR = os.getenv('TELEGRAM_SESSION')
 SJ_KEY = os.getenv('SUPERJOB_KEY') # Твой новый ключ
 # Список каналов БЕЗ собаки @
 CHANNELS = [
-    # Твой основной список
     'vdhl_good', 'mediajobs_ru', 'kinorabochie', 'gigs_for_creatives', 
     'ru_tvjobs', 'work_in_media', 'promofox', 'creative_jobs',
-    
-    # Твой дополнительный список
     'moviestart_ru', 'se_cinema', 'grushamedia', 'teletet', 
-    'cinemapeople', 'my_casting',
-    
-    # ТОП-3 дополнения для коммерческого режима и продакшна (рекомендую!)
-    'distantsiya',           # Дистанция (огромный канал с креативом)
-    'rabota_v_production',   # Работа в продакшне (самое мясо по съемкам)
-    'v_kadre_za_kadrom'      # В кадре и за кадром (вакансии съемочных групп)
+    'cinemapeople', 'my_casting', 'distantsiya', 'rabota_v_production', 'v_kadre_za_kadrom'
 ]
 
 # Создаем клиента для чтения каналов
@@ -89,7 +81,7 @@ def search_hh(query, limit=100):
         for v in r.get('items', []):
             results.append({
                 'id': f"hh_{v['id']}",
-                'text': f"🔴 HH: {v['name']}\n{v['alternate_url']}",
+                'text': f"🔴 HH: {v['name']}\n💰 {pay} | 📅 {v['published_at'][:10]}\n{v['alternate_url']}",
                 'Дата': v['published_at'][:10],
                 'Источник': 'HH', 'Вакансия': v['name'], 'Компания': v['employer']['name'], 'Оплата': 'Договорная', 'Ссылка': v['alternate_url']
             })
@@ -106,7 +98,7 @@ def search_superjob(query, limit=50):
         for v in r.get('objects', []):
             results.append({
                 'id': f"sj_{v['id']}",
-                'text': f"🔵 SJ: {v['profession']}\n{v['link']}",
+                'text': f"🔵 SJ: {v['profession']}\n💰 {pay} | 📅 {datetime.fromtimestamp(v['date_published']).strftime('%d.%m')}\n{v['link']}",
                 'Дата': datetime.fromtimestamp(v['date_published']).strftime('%Y-%m-%d'),
                 'Источник': 'SuperJob', 'Вакансия': v['profession'], 'Компания': v['client'].get('title', '—'), 'Оплата': 'Договорная', 'Ссылка': v['link']
             })
@@ -144,7 +136,7 @@ def search_habr(query, limit=20):
                 # Сохраняем в нашем эталонном формате
                 results.append({
                     'id': f"hb_{link.split('/')[-1]}", # Берем ID вакансии из URL
-                    'text': f"🟢 Habr: {title}\n{link}",
+                    'text': f"🟢 Habr: {title}\n💰 {pay} | 📅 Сегодня\n{link}",
                     'Дата': datetime.now().strftime('%Y-%m-%d'), # Хабр пишет "вчера/сегодня", для Excel ставим текущую
                     'Источник': 'Habr',
                     'Вакансия': title,
@@ -207,62 +199,43 @@ async def telethon_handler(event):
                 except:
                     pass
 
-def generate_pro_excel(query):
-    # ДВИЖОК СБОРА ДАННЫХ ДЛЯ EXCEL (100 ШТУК)
+def generate_excel(query):
     raw_data = []
-    headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # Сбор с HH (100 шт)
-    try:
-        url_hh = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page=100&order_by=publication_time"
-        res = requests.get(url_hh, headers=headers, timeout=5).json()
-        for v in res.get('items', []):
-            s = v.get('salary')
-            pay = f"от {s['from']}" if s and s['from'] else "Договорная"
+    # Собираем данные со всех движков
+    hh = search_hh(query, 100)
+    sj = search_superjob(query, 50)
+    hb = search_habr(query, 20)
+    jf = search_jobfilter(query, 10)
+    
+    # Объединяем чистые данные (без поля 'text')
+    for source in [hh, sj, hb, jf]:
+        for item in source:
+            # Копируем всё кроме 'text' и 'id' для таблицы
             raw_data.append({
-                'Дата': v['published_at'][:10], 'Источник': 'HH',
-                'Вакансия': v['name'], 'Компания': v['employer']['name'],
-                'Оплата': pay, 'Ссылка': v['alternate_url']
+                'Дата': item['Дата'], 'Источник': item['Источник'],
+                'Вакансия': item['Вакансия'], 'Компания': item['Компания'],
+                'Оплата': item['Оплата'], 'Ссылка': item['Ссылка']
             })
-    except: pass
-
-    # Сбор с ТрудВсем
-    try:
-        url_tr = f"https://opendata.trudvsem.ru/api/v1/vacancies/region/77?text={query}"
-        res = requests.get(url_tr, timeout=5).json()
-        if res.get('results'):
-            for v in res['results']['vacancies'][:30]:
-                vac = v['vacancy']
-                raw_data.append({
-                    'Дата': vac['modification-date'], 'Источник': 'ТрудВсем',
-                    'Вакансия': vac['job-name'], 'Компания': vac['company']['name'],
-                    'Оплата': vac.get('salary', 'Договорная'), 'Ссылка': vac['vac_url']
-                })
-    except: pass
 
     if not raw_data: return None
 
-    # ОФОРМЛЕНИЕ EXCEL (СИНИЙ СТИЛЬ)
     df = pd.DataFrame(raw_data)
+    df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
     df = df.sort_values(by='Дата', ascending=False)
     
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Вакансии')
         ws = writer.sheets['Вакансии']
-        
-        # Синяя шапка, белый текст
         fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
         font = Font(color="FFFFFF", bold=True)
-        
         for col_num, value in enumerate(df.columns.values):
             cell = ws.cell(row=1, column=col_num + 1)
-            cell.fill = fill
-            cell.font = font
+            cell.fill = fill; cell.font = font
             cell.alignment = Alignment(horizontal='center')
-            ws.column_dimensions[chr(65 + col_num)].width = 35 # Ширина колонок
-            
-        ws.freeze_panes = 'A2' # Закрепить шапку
+            ws.column_dimensions[chr(65 + col_num)].width = 35
+        ws.freeze_panes = 'A2'
     output.seek(0)
     return output
 
@@ -305,32 +278,32 @@ async def manual_search(message: types.Message):
     query = message.text
     wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # Сбор данных из всех источников
+    # Сбор данных
     hh_res = search_hh(query, 100)
     sj_res = search_superjob(query, 50)
     hb_res = search_habr(query, 20)
     jf_res = search_jobfilter(query, 10)
     
-    if not (hh_res + sj_res + hb_res + jf_res):
+    all_found = hh_res + sj_res + hb_res + jf_res
+    
+    if not all_found:
         await wait.edit_text("Ничего не найдено.")
         return
 
-    # ВЫДАЧА В ТГ (Микс из всех источников для Топ-10)
-    # Берем по чуть-чуть из каждого, чтобы видеть всё сразу
-    top_mix = hh_res[:4] + sj_res[:3] + hb_res[:3]
-    
-    for j in top_mix:
+    # 1. Выдача 10 ссылок (с датой и ЗП)
+    for j in all_found[:10]:
         await message.answer(j['text'], disable_web_page_preview=True)
         await asyncio.sleep(0.1)
 
-    # ВЫДАЧА EXCEL (Всё вместе - 180 вакансий)
-    all_found = hh_res + sj_res + hb_res + jf_res
+    # 2. Выдача Excel (Синий, красивый)
     excel_file = generate_excel(all_found)
-    await message.answer_document(
-        types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-        caption=f"📊 Полный отчет по '{query}'"
-    )
+    if excel_file:
+        await message.answer_document(
+            types.InputFile(excel_file, filename=f"{query}.xlsx"), 
+            caption=f"📊 Полный отчет по '{query}'"
+        )
 
+    # 3. Кнопка подписки
     kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
     await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
     await wait.delete()
