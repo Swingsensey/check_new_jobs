@@ -22,10 +22,8 @@ SESSION_STR = os.getenv('TELEGRAM_SESSION')
 SJ_KEY = os.getenv('SUPERJOB_KEY') # Твой новый ключ
 # Список каналов БЕЗ собаки @
 CHANNELS = [
-    'vdhl_good', 'mediajobs_ru', 'gigs_for_creatives', 
-    'ru_tvjobs', 'work_in_media', 'promofox', 'creative_jobs',
-    'moviestart_ru', 'se_cinema', 'grushamedia', 'teletet', 
-    'cinemapeople', 'my_casting', 'distantsiya', 'rabota_v_production', 'v_kadre_za_kadrom'
+    'vdhl_good', 'mediajobs_ru', 'work_in_media',
+    'moviestart_ru', 'distantsiya'
 ]
 
 # Создаем клиента для чтения каналов
@@ -168,36 +166,33 @@ def search_jobfilter(query, limit=5):
     except: pass
     return results
 
-@client.on(events.NewMessage(chats=CHANNELS))
+@client.on(events.NewMessage())
 async def telethon_handler(event):
-    text = event.message.message
-    if not text:
-        return
+    try:
+        # Получаем имя канала
+        chat = await event.get_chat()
+        username = getattr(chat, 'username', None)
+        
+        # Если канала нет в нашем списке — игнорируем
+        if not username or username not in CHANNELS:
+            return
 
-    # Получаем все подписки из базы
-    subs = get_all_subs()
-    
-    # Проверяем, есть ли ключевое слово в тексте сообщения
-    matched_users = []
-    text_lower = text.lower()
-    for user_id, keyword in subs:
-        if keyword in text_lower:
-            matched_users.append(user_id)
-            
-    if matched_users:
-        # Генерируем уникальный ID для сообщения, чтобы не дублировать
-        job_id = f"tg_{event.chat_id}_{event.id}"
-        if is_new_job(job_id):
-            # Получаем название канала
-            chat = await event.get_chat()
-            chat_title = getattr(chat, 'title', 'Telegram Канал')
-            
-            for uid in set(matched_users):
-                try:
-                    msg = f"⚡️ **ГОРЯЧАЯ ВАКАНСИЯ ИЗ КАНАЛА: {chat_title}**\n\n{text[:3500]}"
-                    await bot.send_message(uid, msg, parse_mode="Markdown")
-                except:
-                    pass
+        text = event.message.message
+        if not text: return
+
+        # Проверяем подписки пользователей
+        subs = get_all_subs()
+        matched_users = [user_id for user_id, kw in subs if kw in text.lower()]
+        
+        if matched_users:
+            job_id = f"tg_{event.chat_id}_{event.id}"
+            if is_new_job(job_id):
+                for uid in set(matched_users):
+                    try:
+                        await bot.send_message(uid, f"⚡️ **ГОРЯЧАЯ ВАКАНСИЯ: {getattr(chat, 'title', 'Канал')}**\n\n{text[:3500]}")
+                    except: pass
+    except Exception as e:
+        logging.error(f"Ошибка в мониторинге каналов: {e}")
 
 def generate_excel(data):
     # Метод теперь просто оформляет таблицу из уже найденных вакансий
@@ -270,45 +265,52 @@ async def manual_search(message: types.Message):
     query = message.text
     wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # Сбор данных ОДИН раз
-    hh = search_hh(query, 100)
-    sj = search_superjob(query, 50)
-    hb = search_habr(query, 20)
-    jf = search_jobfilter(query, 10)
+    # Сбор данных с защитой от сбоев
+    hh = []
+    try: hh = search_hh(query, 100)
+    except: pass
+    
+    sj = []
+    try: sj = search_superjob(query, 50)
+    except: pass
+    
+    hb = []
+    try: hb = search_habr(query, 20)
+    except: pass
+    
+    jf = []
+    try: jf = search_jobfilter(query, 10)
+    except: pass
     
     all_found = hh + sj + hb + jf
     
     if not all_found:
-        await wait.edit_text("Ничего не найдено по этому слову.")
+        await wait.edit_text("Ничего не найдено. Попробуй другое слово.")
         return
 
-    # 1. Твой эталонный стиль в Телеграм (только важные 10 ссылок)
-    # Берем срез из разных источников для разнообразия
+    # 1. Твой эталонный стиль в чат (Топ-10)
     top_mix = hh[:5] + sj[:3] + hb[:2]
-    
     for j in top_mix:
-        # Чистый формат: Иконка + Источник + Название + Ссылка
         icon = "🔴" if "HH" in j['Источник'] else "🔵" if "SJ" in j['Источник'] else "🟢"
         msg = f"{icon} {j['Источник']}: {j['Вакансия']}\n{j['Ссылка']}"
         await message.answer(msg, disable_web_page_preview=True)
         await asyncio.sleep(0.1)
 
-    # 2. Мгновенная выдача Excel (теперь он не висит)
-    excel_file = generate_excel(all_found)
-    if excel_file:
-        await message.answer_document(
-            types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"📊 Полный отчет по запросу '{query}' (все источники)"
-        )
+    # 2. Идеальный синий Excel (теперь он не виснет)
+    try:
+        excel_file = generate_excel(all_found)
+        if excel_file:
+            await message.answer_document(
+                types.InputFile(excel_file, filename=f"{query}.xlsx"), 
+                caption=f"📊 Полный отчет по запросу '{query}'"
+            )
+    except:
+        await message.answer("⚠️ Файл создается, подождите...")
 
     # 3. Кнопка подписки
-    kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
-    await message.answer(f"Хочешь получать уведомления о новых вакансиях '{query}'?", reply_markup=kb)
-    
+    kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться", callback_data=f"sub|{query}"))
+    await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
     await wait.delete()
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
-async def handle(request):
-    return web.Response(text="Bot is Alive")
 
 async def main():
     init_db()
