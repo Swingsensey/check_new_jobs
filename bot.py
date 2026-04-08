@@ -71,19 +71,23 @@ def is_new_job(job_id):
 
 # --- ПАРСЕРЫ ---
 def search_hh(query, limit=100):
-    # Добавлен параметр search_field=name для чистоты поиска
     url = f"https://api.hh.ru/vacancies?text={query}&search_field=name&area=1&per_page={limit}&order_by=publication_time"
     results = []
     try:
         r = requests.get(url, headers=HEADERS, timeout=10).json()
         for v in r.get('items', []):
+            # ВАЖНО: Добавили расчет pay
+            sal = v.get('salary')
+            pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
+            
             results.append({
                 'id': f"hh_{v['id']}",
                 'text': f"🔴 HH: {v['name']}\n💰 {pay} | 📅 {v['published_at'][:10]}\n{v['alternate_url']}",
                 'Дата': v['published_at'][:10],
-                'Источник': 'HH', 'Вакансия': v['name'], 'Компания': v['employer']['name'], 'Оплата': 'Договорная', 'Ссылка': v['alternate_url']
+                'Источник': 'HH', 'Вакансия': v['name'], 'Компания': v['employer']['name'], 'Оплата': pay, 'Ссылка': v['alternate_url']
             })
-    except: pass
+    except Exception as e:
+        logging.error(f"HH error: {e}")
     return results
 
 def search_superjob(query, limit=50):
@@ -173,13 +177,13 @@ def search_jobfilter(query, limit=5):
     except: pass
     return results
 
-@client.on(events.NewMessage()) # ОСТАВЬ СКОБКИ ПУСТЫМИ!
+@client.on(events.NewMessage())
 async def telethon_handler(event):
     try:
+        # Получаем данные о чате максимально безопасно
         chat = await event.get_chat()
         username = getattr(chat, 'username', None)
         
-        # Фильтруем только нужные каналы здесь, чтобы не было ошибок
         if not username or username not in CHANNELS:
             return
 
@@ -195,7 +199,9 @@ async def telethon_handler(event):
                     try:
                         await bot.send_message(uid, f"⚡️ **КАНАЛ: {getattr(chat, 'title', 'Media')}**\n\n{text[:3500]}")
                     except: pass
-    except: pass
+    except Exception as e:
+        # Если канал не распознан, просто молчим и работаем дальше
+        pass
 
 def generate_excel(data):
     # Метод теперь просто оформляет таблицу из уже найденных вакансий
@@ -308,23 +314,20 @@ async def manual_search(message: types.Message):
 async def main():
     init_db()
     
-    # 1. Запуск Веб-сервера (для Render)
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    await web.TCPSite(runner, '0.0.0.0', port).start()
+    # 1. Запуск Веб-сервера
+    app = web.Application(); app.router.add_get('/', handle)
+    runner = web.AppRunner(app); await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
 
-    # 2. Запускаем чтение каналов (ДОЛЖНО БЫТЬ ПЕРЕД БОТОМ)
-    await client.start()
-    logging.info("Мониторинг Telegram-каналов запущен!")
+    # 2. Запуск мониторинга каналов (с защитой от вылета)
+    try:
+        await client.start()
+        logging.info("Мониторинг каналов запущен!")
+    except Exception as e:
+        logging.error(f"Telethon не смог запуститься: {e}")
 
-    # 3. Запуск фонового мониторинга сайтов
+    # 3. Фоновые задачи и Бот
     asyncio.create_task(monitor_sites())
-    
-    # 4. Запуск бота (ЭТА СТРОКА ВСЕГДА ПОСЛЕДНЯЯ)
-    logging.info("Бот запущен и слушает сообщения...")
     await dp.start_polling()
 
 if __name__ == '__main__':
