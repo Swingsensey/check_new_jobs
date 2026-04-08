@@ -87,22 +87,29 @@ def search_hh(query, limit=100):
     return results
 
 def search_superjob(query, limit=50):
-    if not SJ_KEY: return [] # Исправлено имя переменной!
+    if not SJ_KEY: return []
     url = f"https://api.superjob.ru/2.0/vacancies/?keyword={query}&town=4&count={limit}"
     headers = {'X-Api-App-Id': SJ_KEY}
     results = []
     try:
         r = requests.get(url, headers=headers, timeout=10).json()
         for v in r.get('objects', []):
+            # ВНИМАНИЕ: Обязательно вычисляем pay перед использованием!
+            p_from = v.get('payment_from')
+            p_to = v.get('payment_to')
+            if p_from and p_to: pay = f"{p_from}-{p_to}"
+            elif p_from: pay = f"от {p_from}"
+            else: pay = "Договорная"
+            
             results.append({
                 'id': f"sj_{v['id']}",
                 'text': f"🔵 SJ: {v['profession']}\n💰 {pay} | 📅 {datetime.fromtimestamp(v['date_published']).strftime('%d.%m')}\n{v['link']}",
                 'Дата': datetime.fromtimestamp(v['date_published']).strftime('%Y-%m-%d'),
-                'Источник': 'SuperJob', 'Вакансия': v['profession'], 'Компания': v['client'].get('title', '—'), 'Оплата': 'Договорная', 'Ссылка': v['link']
+                'Источник': 'SuperJob', 'Вакансия': v['profession'], 'Компания': v['client'].get('title', '—'), 'Оплата': pay, 'Ссылка': v['link']
             })
-    except: pass
+    except Exception as e:
+        logging.error(f"SJ error: {e}")
     return results
-
 def search_habr(query, limit=20):
     # Москва = 678, тип вакансий = все
     url = f"https://career.habr.com/vacancies?q={query}&city_id=678&type=all"
@@ -261,47 +268,37 @@ async def manual_search(message: types.Message):
     query = message.text
     wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # Сбор данных с защитой от сбоев
-    hh = []
+    # Сбор данных с защитой
+    hh, sj, hb, jf = [], [], [], []
     try: hh = search_hh(query, 100)
     except: pass
-    
-    sj = []
     try: sj = search_superjob(query, 50)
     except: pass
-    
-    hb = []
     try: hb = search_habr(query, 20)
     except: pass
-    
-    jf = []
     try: jf = search_jobfilter(query, 10)
     except: pass
     
     all_found = hh + sj + hb + jf
     
     if not all_found:
-        await wait.edit_text("Ничего не найдено. Попробуй другое слово.")
+        await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
         return
 
-    # 1. Твой эталонный стиль в чат (Топ-10)
+    # 1. Твой стиль ссылок (Топ-10)
+    # Берем срез, чтобы в топе были разные сайты
     top_mix = hh[:5] + sj[:3] + hb[:2]
     for j in top_mix:
-        icon = "🔴" if "HH" in j['Источник'] else "🔵" if "SJ" in j['Источник'] else "🟢"
-        msg = f"{icon} {j['Источник']}: {j['Вакансия']}\n{j['Ссылка']}"
-        await message.answer(msg, disable_web_page_preview=True)
+        await message.answer(j['text'], disable_web_page_preview=True)
         await asyncio.sleep(0.1)
 
-    # 2. Идеальный синий Excel (теперь он не виснет)
-    try:
-        excel_file = generate_excel(all_found)
-        if excel_file:
-            await message.answer_document(
-                types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-                caption=f"📊 Полный отчет по запросу '{query}'"
-            )
-    except:
-        await message.answer("⚠️ Файл создается, подождите...")
+    # 2. Твой идеальный Excel
+    excel_file = generate_excel(all_found)
+    if excel_file:
+        await message.answer_document(
+            types.InputFile(excel_file, filename=f"{query}.xlsx"), 
+            caption=f"📊 Полный отчет по запросу '{query}'"
+        )
 
     # 3. Кнопка подписки
     kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться", callback_data=f"sub|{query}"))
