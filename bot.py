@@ -76,10 +76,11 @@ def search_hh(query, limit=100):
     try:
         r = requests.get(url, headers=HEADERS, timeout=10).json()
         for v in r.get('items', []):
-            # ВАЖНО: Добавили расчет pay
+            # СНАЧАЛА СЧИТАЕМ PAY
             sal = v.get('salary')
             pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
             
+            # ПОТОМ ИСПОЛЬЗУЕМ
             results.append({
                 'id': f"hh_{v['id']}",
                 'text': f"🔴 HH: {v['name']}\n💰 {pay} | 📅 {v['published_at'][:10]}\n{v['alternate_url']}",
@@ -310,17 +311,20 @@ async def manual_search(message: types.Message):
     await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
     await wait.delete()
     
+    async def main():
+    init_db()
+    
     # 1. Запуск Веб-сервера
     app = web.Application(); app.router.add_get('/', handle)
     runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
 
-    # 2. Запуск мониторинга каналов (с защитой от вылета)
-    #try:
-        #await client.start()
-        #logging.info("Мониторинг каналов запущен!")
-    #except Exception as e:
-        #logging.error(f"Telethon не смог запуститься: {e}")
+    # 2. Запуск мониторинга каналов
+    try:
+        await client.start()
+        logging.info("Мониторинг каналов запущен!")
+    except Exception as e:
+        logging.error(f"Telethon error: {e}")
 
     # 3. Фоновые задачи и Бот
     asyncio.create_task(monitor_sites())
