@@ -39,8 +39,6 @@ CHANNELS = [
 # Создаем клиента для чтения каналов
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
-# Список каналов для мониторинга (добавь свои)
-CHANNELS = ['@vdhl_good', '@mediajobs_ru', '@kinorabochie', '@gigs_for_creatives']
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
@@ -82,33 +80,35 @@ def is_new_job(job_id):
     return False
 
 # --- ПАРСЕРЫ ---
-def search_hh(query, limit=5):
-    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
+def search_hh(query, limit=100):
+    # Добавлен параметр search_field=name для чистоты поиска
+    url = f"https://api.hh.ru/vacancies?text={query}&search_field=name&area=1&per_page={limit}&order_by=publication_time"
     results = []
     try:
         r = requests.get(url, headers=HEADERS, timeout=10).json()
         for v in r.get('items', []):
             results.append({
                 'id': f"hh_{v['id']}",
-                'text': f"🔴 **HH: {v['name']}**\n{v['alternate_url']}"
+                'text': f"🔴 HH: {v['name']}\n{v['alternate_url']}",
+                'Дата': v['published_at'][:10],
+                'Источник': 'HH', 'Вакансия': v['name'], 'Компания': v['employer']['name'], 'Оплата': 'Договорная', 'Ссылка': v['alternate_url']
             })
     except: pass
     return results
 
 def search_superjob(query, limit=50):
-    if not SJ_KEY: return [] # Здесь исправили имя переменной
+    if not SJ_KEY: return [] # Исправлено имя переменной!
     url = f"https://api.superjob.ru/2.0/vacancies/?keyword={query}&town=4&count={limit}"
     headers = {'X-Api-App-Id': SJ_KEY}
     results = []
     try:
         r = requests.get(url, headers=headers, timeout=10).json()
         for v in r.get('objects', []):
-            pay = f"от {v.get('payment_from')}" if v.get('payment_from') else "Договорная"
             results.append({
                 'id': f"sj_{v['id']}",
                 'text': f"🔵 SJ: {v['profession']}\n{v['link']}",
                 'Дата': datetime.fromtimestamp(v['date_published']).strftime('%Y-%m-%d'),
-                'Источник': 'SuperJob', 'Вакансия': v['profession'], 'Компания': v['client'].get('title', '—'), 'Оплата': pay, 'Ссылка': v['link']
+                'Источник': 'SuperJob', 'Вакансия': v['profession'], 'Компания': v['client'].get('title', '—'), 'Оплата': 'Договорная', 'Ссылка': v['link']
             })
     except: pass
     return results
@@ -303,36 +303,34 @@ async def start_cmd(message: types.Message):
 @dp.message_handler()
 async def manual_search(message: types.Message):
     query = message.text
-    wait = await message.answer(f"🔎 Ищу вакансии по запросу: *{query}*...", parse_mode="Markdown")
+    wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # СБОР ДАННЫХ ИЗ 4-х ИСТОЧНИКОВ
+    # Сбор данных из всех источников
     hh_res = search_hh(query, 100)
-    sj_res = search_superjob(query, 50) 
-    hb_res = search_habr(query, 20) # Новый Хабр
+    sj_res = search_superjob(query, 50)
+    hb_res = search_habr(query, 20)
     jf_res = search_jobfilter(query, 10)
     
-    # Объединяем всё в один список
-    found = hh_res + sj_res + hb_res + jf_res
-    
-    if not found:
+    if not (hh_res + sj_res + hb_res + jf_res):
         await wait.edit_text("Ничего не найдено.")
         return
 
-    # ВЫДАЧА В ТГ (Твой эталонный лаконичный стиль)
-    # Выводим Топ-10 для чата (сначала HH, потом SJ, потом Habr)
-    for j in found[:10]:
+    # ВЫДАЧА В ТГ (Микс из всех источников для Топ-10)
+    # Берем по чуть-чуть из каждого, чтобы видеть всё сразу
+    top_mix = hh_res[:4] + sj_res[:3] + hb_res[:3]
+    
+    for j in top_mix:
         await message.answer(j['text'], disable_web_page_preview=True)
         await asyncio.sleep(0.1)
 
-    # ВЫДАЧА EXCEL (Синий отчет, куда попадут все 180 вакансий)
-    excel_file = generate_excel(found)
-    if excel_file:
-        await message.answer_document(
-            types.InputFile(excel_file, filename=f"{query.replace(' ', '_')}.xlsx"),
-            caption=f"📊 Полный отчет: {len(found)} вакансий (HH + SJ + Habr + JF)"
-        )
+    # ВЫДАЧА EXCEL (Всё вместе - 180 вакансий)
+    all_found = hh_res + sj_res + hb_res + jf_res
+    excel_file = generate_excel(all_found)
+    await message.answer_document(
+        types.InputFile(excel_file, filename=f"{query}.xlsx"), 
+        caption=f"📊 Полный отчет по '{query}'"
+    )
 
-    # Кнопка подписки
     kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
     await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
     await wait.delete()
