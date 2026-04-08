@@ -126,39 +126,50 @@ def search_superjob(query, limit=50):
     return results
 
 def search_habr(query, limit=20):
-    # Москва на Хабр Карьере имеет ID 678
+    # Москва = 678, тип вакансий = все
     url = f"https://career.habr.com/vacancies?q={query}&city_id=678&type=all"
     results = []
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
+        # Устанавливаем таймаут чуть больше, Хабр иногда думает
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            logging.error(f"Habr returned status {r.status_code}")
+            return []
+
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # Находим карточки вакансий
+        # Основной контейнер вакансий на Хабре
         items = soup.find_all('div', class_='vacancy-card')
         
         for i in items[:limit]:
-            title_tag = i.find('a', class_='vacancy-card__title-link')
-            company_tag = i.find('div', class_='vacancy-card__company-title')
-            salary_tag = i.find('div', class_='basic-salary')
+            # Ищем заголовок и ссылку
+            title_link = i.find('a', class_='vacancy-card__title-link')
+            company_link = i.find('a', class_='vacancy-card__company-title') # Ссылка на компанию
+            salary_div = i.find('div', class_='basic-salary') # Зарплата
             
-            if title_tag:
-                title = title_tag.text.strip()
-                link = "https://career.habr.com" + title_tag['href']
-                company = company_tag.text.strip() if company_tag else "Не указана"
-                pay = salary_tag.text.strip() if salary_tag else "Договорная"
+            if title_link:
+                title = title_link.text.strip()
+                link = "https://career.habr.com" + title_link['href']
+                company = company_link.text.strip() if company_link else "Компания не указана"
+                pay = salary_div.text.strip() if salary_div else "Договорная"
                 
+                # Сохраняем в нашем эталонном формате
                 results.append({
-                    'id': f"hb_{link[-6:]}", # Берем ID из конца ссылки
+                    'id': f"hb_{link.split('/')[-1]}", # Берем ID вакансии из URL
                     'text': f"🟢 Habr: {title}\n{link}",
-                    'Дата': datetime.now().strftime('%Y-%m-%d'),
+                    'Дата': datetime.now().strftime('%Y-%m-%d'), # Хабр пишет "вчера/сегодня", для Excel ставим текущую
                     'Источник': 'Habr',
                     'Вакансия': title,
                     'Компания': company,
                     'Оплата': pay,
                     'Ссылка': link
                 })
+        
+        logging.info(f"Habr: Найдено {len(results)} вакансий")
+        
     except Exception as e:
-        logging.error(f"Habr error: {e}")
+        logging.error(f"Критическая ошибка Хабр Карьеры: {e}")
+    
     return results
 
 def search_jobfilter(query, limit=5):
