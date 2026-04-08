@@ -22,8 +22,10 @@ SESSION_STR = os.getenv('TELEGRAM_SESSION')
 SJ_KEY = os.getenv('SUPERJOB_KEY') # Твой новый ключ
 # Список каналов БЕЗ собаки @
 CHANNELS = [
-    'vdhl_good', 'mediajobs_ru', 'work_in_media',
-    'moviestart_ru', 'distantsiya'
+    'vdhl_good', 'mediajobs_ru', 'work_in_media', 'moviestart_ru', 'distantsiya',
+    'theblueprintcareer', 'huggabletalents', 'careerspace', 'morejobs', 'heyanie', 
+    'marketing_jobs', 'mirkreatorovjob', 'budujobs', 'normrabota', 'jobpower', 
+    'it_vakansii_jobs', 'workasap', 'forproducer', 'vacanciesrus'
 ]
 
 # Создаем клиента для чтения каналов
@@ -70,6 +72,28 @@ def is_new_job(job_id):
     return False
 
 # --- ПАРСЕРЫ ---
+async def search_telegram_history(query, limit_per_channel=5):
+    results = []
+    query_low = query.lower()
+    for channel in CHANNELS:
+        try:
+            # Метод iter_messages просматривает последние сообщения в канале
+            async for msg in client.iter_messages(channel, limit=limit_per_channel):
+                if msg.text and query_low in msg.text.lower():
+                    results.append({
+                        'id': f"tg_hist_{channel}_{msg.id}",
+                        'text': f"📱 TG [{channel}]: {msg.text[:400]}...\nhttps://t.me/{channel}/{msg.id}",
+                        'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "Неизвестно",
+                        'Источник': f'TG: {channel}',
+                        'Вакансия': 'Архив канала',
+                        'Компания': channel,
+                        'Оплата': 'В посте',
+                        'Ссылка': f"https://t.me/{channel}/{msg.id}"
+                    })
+        except Exception as e:
+            logging.error(f"Ошибка поиска в архиве {channel}: {e}")
+    return results
+
 def search_hh(query, limit=100):
     url = f"https://api.hh.ru/vacancies?text={query}&search_field=name&area=1&per_page={limit}&order_by=publication_time"
     results = []
@@ -212,6 +236,20 @@ async def telethon_handler(event):
         # Если канал не распознан, просто молчим и работаем дальше
         pass
 
+async def monitor_sites():
+    while True:
+        try:
+            subs = get_all_subs()
+            for user_id, kw in subs:
+                # Мониторим HH (3 шт) и SJ (3 шт)
+                all_found = search_hh(kw, 3) + search_superjob(kw, 3)
+                for job in all_found:
+                    if is_new_job(job['id']):
+                        await bot.send_message(user_id, f"🔔 Новинка по подписке [{kw.upper()}]:\n\n{job['text']}")
+                        await asyncio.sleep(0.5)
+        except: pass
+        await asyncio.sleep(1800)
+
 def generate_excel(data):
     try:
         raw_data = []
@@ -273,7 +311,14 @@ async def manual_search(message: types.Message):
     query = message.text
     wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # Сбор данных
+    # 1. Сбор данных (Сайты + История Telegram)
+    tg_hist = []
+    try:
+        # Поиск по архиву каналов (твоя идея)
+        tg_hist = await search_telegram_history(query, limit_per_channel=5)
+    except Exception as e:
+        logging.error(f"TG History error: {e}")
+
     hh, sj, hb, jf = [], [], [], []
     try: hh = search_hh(query, 100)
     except: pass
@@ -284,31 +329,37 @@ async def manual_search(message: types.Message):
     try: jf = search_jobfilter(query, 10)
     except: pass
     
-    all_found = hh + sj + hb + jf
+    # Объединяем всё для Excel
+    all_found = tg_hist + hh + sj + hb + jf
     
     if not all_found:
         await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
         return
 
-    # 1. Твой стиль ссылок (Топ-10)
-    top_mix = hh[:5] + sj[:3] + hb[:2]
+    # 2. Твой стиль ссылок (Топ-10)
+    # Берем 3 самых свежих из ТГ, 5 из HH и 2 из SuperJob
+    top_mix = tg_hist[:3] + hh[:5] + sj[:2]
+    
     for j in top_mix:
         try:
             await message.answer(j['text'], disable_web_page_preview=True)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2) # Небольшая пауза, чтобы не спамить
         except: pass
 
-    # 2. Идеальный синий Excel
+    # 3. Идеальный синий Excel (включает и сайты, и находки из ТГ)
     excel_file = generate_excel(all_found)
     if excel_file:
         await message.answer_document(
             types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"📊 Полный отчет по запросу '{query}'"
+            caption=f"📊 Найдено вакансий: {len(all_found)}\n(Сайты + {len(CHANNELS)} каналов)"
         )
 
-    # 3. Кнопка подписки
-    kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться", callback_data=f"sub|{query}"))
+    # 4. Кнопка подписки
+    kb = types.InlineKeyboardMarkup().add(
+        types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
+    )
     await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
+    
     await wait.delete()
     
 async def handle(request): # Добавь это, чтобы веб-сервер работал
