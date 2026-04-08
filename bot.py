@@ -125,6 +125,42 @@ def search_superjob(query, limit=50):
         logging.error(f"SuperJob error: {e}")
     return results
 
+def search_habr(query, limit=20):
+    # Москва на Хабр Карьере имеет ID 678
+    url = f"https://career.habr.com/vacancies?q={query}&city_id=678&type=all"
+    results = []
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # Находим карточки вакансий
+        items = soup.find_all('div', class_='vacancy-card')
+        
+        for i in items[:limit]:
+            title_tag = i.find('a', class_='vacancy-card__title-link')
+            company_tag = i.find('div', class_='vacancy-card__company-title')
+            salary_tag = i.find('div', class_='basic-salary')
+            
+            if title_tag:
+                title = title_tag.text.strip()
+                link = "https://career.habr.com" + title_tag['href']
+                company = company_tag.text.strip() if company_tag else "Не указана"
+                pay = salary_tag.text.strip() if salary_tag else "Договорная"
+                
+                results.append({
+                    'id': f"hb_{link[-6:]}", # Берем ID из конца ссылки
+                    'text': f"🟢 Habr: {title}\n{link}",
+                    'Дата': datetime.now().strftime('%Y-%m-%d'),
+                    'Источник': 'Habr',
+                    'Вакансия': title,
+                    'Компания': company,
+                    'Оплата': pay,
+                    'Ссылка': link
+                })
+    except Exception as e:
+        logging.error(f"Habr error: {e}")
+    return results
+
 def search_jobfilter(query, limit=5):
     url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
     results = []
@@ -231,19 +267,18 @@ def generate_pro_excel(query):
     output.seek(0)
     return output
 
-# --- МОНИТОРИНГ САЙТОВ ---
 async def monitor_sites():
     while True:
         try:
             subs = get_all_subs()
             for user_id, kw in subs:
-                all_found = search_hh(kw, 3) + search_trudvsem(kw, 3) + search_jobfilter(kw, 3)
+                # Проверяем по 3 штуки из каждого ТОП источника
+                all_found = search_hh(kw, 3) + search_superjob(kw, 3) + search_habr(kw, 3)
                 for job in all_found:
                     if is_new_job(job['id']):
-                        await bot.send_message(user_id, f"🔔 Новинка по вашей подписке [{kw.upper()}]:\n\n{job['text']}", parse_mode="Markdown")
+                        await bot.send_message(user_id, f"🔔 Новинка по подписке [{kw.upper()}]:\n\n{job['text']}")
                         await asyncio.sleep(0.5)
-        except Exception as e:
-            logging.error(f"Error in monitor: {e}")
+        except: pass
         await asyncio.sleep(1800)
 
 # --- ОБРАБОТЧИКИ ---
@@ -269,41 +304,38 @@ async def start_cmd(message: types.Message):
 @dp.message_handler()
 async def manual_search(message: types.Message):
     query = message.text
-    # 1. Сообщение о начале поиска
     wait = await message.answer(f"🔎 Ищу вакансии по запросу: *{query}*...", parse_mode="Markdown")
     
-    # 2. Сбор данных (собираем всё в один список)
-    # Используем лимиты: HH (100), SuperJob (50), JobFilter (10)
+    # СБОР ДАННЫХ ИЗ 4-х ИСТОЧНИКОВ
     hh_res = search_hh(query, 100)
     sj_res = search_superjob(query, 50) 
+    hb_res = search_habr(query, 20) # Новый Хабр
     jf_res = search_jobfilter(query, 10)
-    found = hh_res + sj_res + jf_res
+    
+    # Объединяем всё в один список
+    found = hh_res + sj_res + hb_res + jf_res
     
     if not found:
-        await wait.edit_text("Ничего не найдено. Попробуй изменить запрос.")
+        await wait.edit_text("Ничего не найдено.")
         return
 
-    # 3. Выдача в Телеграм (ТОТ САМЫЙ ЧИСТЫЙ СТИЛЬ: Текст + Ссылка)
-    # Выводим первые 10 самых свежих вакансий
+    # ВЫДАЧА В ТГ (Твой эталонный лаконичный стиль)
+    # Выводим Топ-10 для чата (сначала HH, потом SJ, потом Habr)
     for j in found[:10]:
         await message.answer(j['text'], disable_web_page_preview=True)
-        await asyncio.sleep(0.1) # Короткая пауза для стабильности
+        await asyncio.sleep(0.1)
 
-    # 4. ГЕНЕРАЦИЯ И ОТПРАВКА EXCEL (Твой синий отчет)
-    # Мы передаем весь список 'found' (там 100+ вакансий)
-    excel_file = generate_excel(found) 
+    # ВЫДАЧА EXCEL (Синий отчет, куда попадут все 180 вакансий)
+    excel_file = generate_excel(found)
     if excel_file:
         await message.answer_document(
             types.InputFile(excel_file, filename=f"{query.replace(' ', '_')}.xlsx"),
-            caption=f"📊 Полный отчет по запросу '{query}' (HH + SJ + JF)"
+            caption=f"📊 Полный отчет: {len(found)} вакансий (HH + SJ + Habr + JF)"
         )
 
-    # 5. Кнопка подписки
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
+    # Кнопка подписки
+    kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
     await message.answer("Включить авто-мониторинг этого запроса?", reply_markup=kb)
-    
-    # Убираем сервисное сообщение "Ищу..."
     await wait.delete()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
