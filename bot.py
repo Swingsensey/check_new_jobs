@@ -513,6 +513,9 @@ async def sub_handler(cb: types.CallbackQuery):
         logging.error(f"Subscription error: {e}")
         await bot.answer_callback_query(cb.id, text="❌ Произошла ошибка при подписке.")
 
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
 async def main(): # НИКАКИХ ОТСТУПОВ ПЕРЕД async
     init_db()
     
