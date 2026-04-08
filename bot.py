@@ -311,36 +311,46 @@ async def manual_search(message: types.Message):
     query = message.text
     wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # 1. Сбор данных (увеличиваем лимиты, чтобы было из чего выбирать)
+    # 1. Сбор данных
     tg_hist = []
     try: tg_hist = await search_telegram_history(query, limit_per_channel=5)
     except: pass
 
-    hh, sj, hb, jf = [], [], [], []
-    try: hh = search_hh(query, 100)
+    hh, sj, hb, jf = [], [], [], [], []
+    try: hh = search_hh(query, 80)
     except: pass
-    try: sj = search_superjob(query, 50)
+    try: sj = search_superjob(query, 40)
     except: pass
     try: hb = search_habr(query, 30)
     except: pass
     try: jf = search_jobfilter(query, 20)
     except: pass
     
-    # Объединяем всё для Excel
-    all_found = tg_hist + hh + sj + hb + jf
+    # ФИЛЬТР ДУБЛИКАТОВ (чтобы одна и та же вакансия не вышла дважды)
+    all_raw = tg_hist + hh + sj + hb + jf
+    seen_ids = set()
+    all_found = []
+    for job in all_raw:
+        if job['id'] not in seen_ids:
+            all_found.append(job)
+            seen_ids.add(job['id'])
     
     if not all_found:
         await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
         return
 
-    # 2. РАСПРЕДЕЛЕНИЕ НА 20 СООБЩЕНИЙ (по 4 из каждого источника)
-    # Если в каком-то источнике меньше 4, он просто отдаст сколько есть
-    top_mix = tg_hist[:4] + hh[:4] + sj[:4] + hb[:4] + jf[:4]
-    
-    for j in top_mix:
+    # 2. РАСПРЕДЕЛЕНИЕ (по 4 из каждого источника, но только уникальные)
+    top_mix = []
+    for source in [tg_hist, hh, sj, hb, jf]:
+        added = 0
+        for item in source:
+            if added < 4 and item in all_found:
+                top_mix.append(item)
+                added += 1
+
+    for j in top_mix[:20]:
         try:
             await message.answer(j['text'], disable_web_page_preview=True)
-            # Пауза 0.2 сек, чтобы 20 сообщений не вызвали блокировку от Telegram
             await asyncio.sleep(0.2) 
         except: pass
 
@@ -349,7 +359,7 @@ async def manual_search(message: types.Message):
     if excel_file:
         await message.answer_document(
             types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"📊 Найдено вакансий: {len(all_found)}\n(Собрано по 20 самым свежим)"
+            caption=f"📊 Найдено уникальных вакансий: {len(all_found)}\n(Собрано из сайтов и каналов)"
         )
 
     # 4. Кнопка подписки
@@ -357,7 +367,6 @@ async def manual_search(message: types.Message):
         types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
     )
     await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
-    
     await wait.delete()
 
 # --- ОБРАБОТЧИК КНОПКИ ПОДПИСКИ ---
