@@ -186,7 +186,7 @@ def search_jobfilter(query, limit=5):
     except: pass
     return results
 
-@client.on(events.NewMessage())
+@client.on(events.NewMessage(chats=CHANNELS))
 async def telethon_handler(event):
     try:
         # Получаем данные о чате максимально безопасно
@@ -311,23 +311,29 @@ async def manual_search(message: types.Message):
     await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
     await wait.delete()
     
-    async def main():
+async def handle(request): # Добавь это, чтобы веб-сервер работал
+    return web.Response(text="OK")
+
+async def main(): # НИКАКИХ ОТСТУПОВ ПЕРЕД async
     init_db()
     
     # 1. Запуск Веб-сервера
-    app = web.Application(); app.router.add_get('/', handle)
-    runner = web.AppRunner(app); await runner.setup()
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
 
     # 2. Запуск мониторинга каналов
     try:
         await client.start()
-        logging.info("Мониторинг каналов запущен!")
+        logging.info("Telethon запущен!")
     except Exception as e:
         logging.error(f"Telethon error: {e}")
 
-    # 3. Фоновые задачи и Бот
-    asyncio.create_task(monitor_sites())
+    # 3. Бот
+    # Если функции monitor_sites нет, закомментируй строку ниже:
+    # asyncio.create_task(monitor_sites()) 
     await dp.start_polling()
 
 if __name__ == '__main__':
