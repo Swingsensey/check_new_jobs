@@ -311,22 +311,19 @@ async def manual_search(message: types.Message):
     query = message.text
     wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # 1. Сбор данных (Сайты + История Telegram)
+    # 1. Сбор данных (увеличиваем лимиты, чтобы было из чего выбирать)
     tg_hist = []
-    try:
-        # Поиск по архиву каналов (твоя идея)
-        tg_hist = await search_telegram_history(query, limit_per_channel=5)
-    except Exception as e:
-        logging.error(f"TG History error: {e}")
+    try: tg_hist = await search_telegram_history(query, limit_per_channel=5)
+    except: pass
 
     hh, sj, hb, jf = [], [], [], []
     try: hh = search_hh(query, 100)
     except: pass
     try: sj = search_superjob(query, 50)
     except: pass
-    try: hb = search_habr(query, 20)
+    try: hb = search_habr(query, 30)
     except: pass
-    try: jf = search_jobfilter(query, 10)
+    try: jf = search_jobfilter(query, 20)
     except: pass
     
     # Объединяем всё для Excel
@@ -336,22 +333,23 @@ async def manual_search(message: types.Message):
         await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
         return
 
-    # 2. Твой стиль ссылок (Топ-10)
-    # Берем 3 самых свежих из ТГ, 5 из HH и 2 из SuperJob
-    top_mix = tg_hist[:3] + hh[:5] + sj[:2]
+    # 2. РАСПРЕДЕЛЕНИЕ НА 20 СООБЩЕНИЙ (по 4 из каждого источника)
+    # Если в каком-то источнике меньше 4, он просто отдаст сколько есть
+    top_mix = tg_hist[:4] + hh[:4] + sj[:4] + hb[:4] + jf[:4]
     
     for j in top_mix:
         try:
             await message.answer(j['text'], disable_web_page_preview=True)
-            await asyncio.sleep(0.2) # Небольшая пауза, чтобы не спамить
+            # Пауза 0.2 сек, чтобы 20 сообщений не вызвали блокировку от Telegram
+            await asyncio.sleep(0.2) 
         except: pass
 
-    # 3. Идеальный синий Excel (включает и сайты, и находки из ТГ)
+    # 3. Excel-отчет
     excel_file = generate_excel(all_found)
     if excel_file:
         await message.answer_document(
             types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"📊 Найдено вакансий: {len(all_found)}\n(Сайты + {len(CHANNELS)} каналов)"
+            caption=f"📊 Найдено вакансий: {len(all_found)}\n(Собрано по 20 самым свежим)"
         )
 
     # 4. Кнопка подписки
