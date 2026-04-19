@@ -483,123 +483,87 @@ async def clear_subs(message: types.Message):
 
 @dp.message_handler()
 async def manual_search(message: types.Message):
-    # Игнорируем команды
     if message.text.startswith('/'):
         return
     
     query = message.text
-    # Создаем стартовое сообщение
     wait = await message.answer(f"🔎 Начинаю поиск по запросу: `{query}`...")
     
     all_found = []
     seen_ids = set()
 
-    # --- ЭТАП 1: ТЕЛЕГРАМ КАНАЛЫ (Архивы) ---
+    # --- ЭТАП 1: ТЕЛЕГРАМ (Архивы) ---
     await wait.edit_text(f"📡 Проверяю архивы {len(CHANNELS)} каналов...")
     
-    tg_hist = []
     try:
-        # Даем боту понять, что если ТГ не готов, мы просто пропускаем этот этап
-        if client.is_connected():
-            tg_hist = await search_telegram_history(query, limit_per_channel=5)
-    except Exception as e:
-        logging.error(f"Глобальная ошибка поиска ТГ: {e}")
+        # Проверка подключения клиента
+        if not client.is_connected():
+            await client.connect()
+            
+        tg_hist = await search_telegram_history(query, limit_per_channel=5)
+        
         if tg_hist:
             for job in tg_hist:
                 if job['id'] not in seen_ids:
                     all_found.append(job)
                     seen_ids.add(job['id'])
             
-            # СРАЗУ выводим первые 4 результата из TG
+            # Сразу выводим 4 лучших из ТГ
             for j in tg_hist[:4]:
                 await message.answer(j['text'], disable_web_page_preview=True)
                 await asyncio.sleep(0.2)
     except Exception as e:
-        logging.error(f"TG History error: {e}")
+        logging.error(f"Ошибка поиска в ТГ: {e}")
 
-    # --- ЭТАП 2: САЙТЫ (HH, SJ, Habr, GeekJob, JobFilter) ---
-    await wait.edit_text(f"🌐 Опрашиваю HH.ru, SuperJob, Habr и GeekJob...")
+    # --- ЭТАП 2: САЙТЫ (HH, SJ, Habr, JobFilter) ---
+    await wait.edit_text(f"🌐 Опрашиваю сайты HH, SuperJob, Habr...")
     
-    hh, sj, hb, gj, jf = [], [], [], [], []
+    # ИСПРАВЛЕНО: Теперь переменных столько же, сколько списков
+    hh, sj, hb, jf = [], [], [], []
+    
     try: hh = search_hh(query, 80)
     except: pass
     try: sj = search_superjob(query, 40)
     except: pass
     try: hb = search_habr(query, 30)
     except: pass
-    try: 
-        # Если метод search_geekjob еще не добавлен, эта строка просто не сработает
-        gj = search_geekjob(query, 15) 
-    except: pass
     try: jf = search_jobfilter(query, 15)
     except: pass
 
-    # Собираем всё в общую базу для Excel и фильтруем дубли
-    sites_raw = hh + sj + hb + gj + jf
+    # Собираем данные с сайтов
+    sites_raw = hh + sj + hb + jf
     for job in sites_raw:
         if job['id'] not in seen_ids:
             all_found.append(job)
             seen_ids.add(job['id'])
 
-    # Довыводим в чат по 3 лучших вакансии с каждого сайта (итого еще ~12 сообщений)
-    for source in [hh[:3], sj[:3], hb[:2], gj[:2]]:
+    # Выводим по 2 лучшие вакансии с каждого сайта в чат
+    for source in [hh[:2], sj[:2], hb[:2]]:
         for j in source:
-            # Выводим только если мы еще не кидали это сообщение выше
             await message.answer(j['text'], disable_web_page_preview=True)
             await asyncio.sleep(0.2)
 
     if not all_found:
-        await wait.edit_text(f"По запросу '{query}' ничего не найдено. Попробуй другое слово.")
+        await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
         return
 
-    # --- ЭТАП 3: ФИНАЛИЗАЦИЯ И EXCEL ---
+    # --- ЭТАП 3: ФИНАЛИЗАЦИЯ ---
     await wait.edit_text(f"📊 Сбор завершен! Формирую отчет...")
     
     excel_file = generate_excel(all_found)
     if excel_file:
         await message.answer_document(
             types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"✅ Найдено вакансий: {len(all_found)}\n(54 канала + 5 сайтов)"
+            caption=f"✅ Найдено вакансий: {len(all_found)}\n(54 канала + сайты)"
         )
 
-    # Кнопка подписки
     kb = types.InlineKeyboardMarkup().add(
         types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
     )
     await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
     
-    # Удаляем служебное сообщение "Начинаю поиск..."
     await wait.delete()
-
-# --- ОБРАБОТЧИК КНОПКИ ПОДПИСКИ ---
-@dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
-async def sub_handler(cb: types.CallbackQuery):
-    # 1. Извлекаем ключевое слово из даты кнопки
-    kw = cb.data.split('|')[1]
-    user_id = cb.from_user.id
     
-    try:
-        # 2. Записываем в базу данных
-        add_subscription(user_id, kw)
-        
-        # 3. Отправляем всплывающее уведомление (alert)
-        await bot.answer_callback_query(
-            cb.id, 
-            text=f"✅ Подписка на '{kw}' оформлена!", 
-            show_alert=True
-        )
-        
-        # 4. Отправляем подтверждающее сообщение в чат
-        await bot.send_message(
-            user_id, 
-            f"🔔 **Готово!**\n\nЯ запомнил запрос: `{kw}`.\n"
-            f"Как только в каналах или на сайтах появится новая вакансия с этим словом, я мгновенно пришлю её тебе сюда."
-        )
-        
-    except Exception as e:
-        logging.error(f"Subscription error: {e}")
-        await bot.answer_callback_query(cb.id, text="❌ Произошла ошибка при подписке.")
-
 async def handle(request):
     return web.Response(text="Bot is running!")
 
