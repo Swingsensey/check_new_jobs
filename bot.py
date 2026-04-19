@@ -554,15 +554,28 @@ async def manual_search(message: types.Message):
 
     for j in top_results:
         try:
-            # j['text'] должен быть подготовлен под HTML или очищен
-            # Если в j['text'] есть < или >, их нужно экранировать: .replace("<", "&lt;")
-            safe_text = j['text']
+            # 1. Получаем текст
+            content = j.get('text', '')
+
+            # 2. Экранируем его (превращаем < в &lt; и т.д.)
+            # Это гарантирует, что Telegram не выдаст ошибку "Can't parse entities"
+            safe_text = html.escape(content)
+
+            # 3. (Опционально) Если ты хочешь, чтобы ссылки внутри текста 
+            # оставались кликабельными, Telegram обычно сам подсвечивает URL 
+            # даже после html.escape.
+            
             await message.answer(safe_text, disable_web_page_preview=True, parse_mode="HTML")
-            await asyncio.sleep(0.3) # Чуть увеличили паузу для защиты от Flood
+            await asyncio.sleep(0.3) 
+            
         except Exception as e:
-            # Если HTML упал (например, из-за некорректных тегов в описании), шлем текстом
-            await message.answer(j['text'][:4000], disable_web_page_preview=True)
-            logging.error(f"Ошибка отправки сообщения: {e}")
+            logging.error(f"Ошибка отправки HTML: {e}")
+            # Если всё равно ошибка (например, текст > 4096 символов), 
+            # отправляем просто текст, обрезав его на всякий случай
+            try:
+                await message.answer(j.get('text', '')[:4000], disable_web_page_preview=True)
+            except:
+                pass
 
     # 4. Генерация отчета и завершение
     with suppress(MessageNotModified):
