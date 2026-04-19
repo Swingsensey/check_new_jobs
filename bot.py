@@ -25,7 +25,17 @@ CHANNELS = [
     'vdhl_good', 'mediajobs_ru', 'work_in_media', 'moviestart_ru', 'distantsiya',
     'theblueprintcareer', 'huggabletalents', 'careerspace', 'morejobs', 'heyanie', 
     'marketing_jobs', 'mirkreatorovjob', 'budujobs', 'normrabota', 'jobpower', 
-    'it_vakansii_jobs', 'workasap', 'forproducer', 'vacanciesrus'
+    'it_vakansii_jobs', 'workasap', 'forproducer', 'vacanciesrus', 
+    'honeyiwantmoney', 'evacuatejobs', 'workinart', 'young_relocate', 'iRecommendWork_IT',
+    'Inwork', 'cliquejobs', 'fashionfaculty', 'forallmedia', 'vitrinajobs',
+    'dnative_job', 'Young_and_Yandex', 'digital_rabota', 'jobforpr', 'megafonjobs',
+    'cozy_hr', 'rassvet_pro', 'young_june', 'mtsfintechjobs', 'digital_hr',
+    'zdemcv', 'foranalysts', 'hcareers_jobs', 'product_jobs', 'edujobs',
+    'talentswanted', 'forchiefs', 'rabota_marketing_juniors', 'tj_collega', 'remotegeekjob',
+    'forallmarketing', 'hsecareer', 'dddwork', 'ya_jobs_pm', 'forproducts',
+    'practicum_experts', 'zloy_kollega', 'jobforjunior', 'vacantcist', 'avito_career',
+    'workasap', 'mirkreatorovjob', 'careerspace', 'huggabletalents', 'theblueprintcareer',
+    'heyanie', 'marketing_jobs', 'it_vakansii_jobs'
 ]
 
 # Создаем клиента для чтения каналов
@@ -184,6 +194,32 @@ def search_habr(query, limit=20):
     except Exception as e:
         logging.error(f"Критическая ошибка Хабр Карьеры: {e}")
     
+    return results
+
+def search_geekjob(query, limit=10):
+    # Поиск по разделу Digital/IT
+    url = f"https://geekjob.ru/vacancies?q={query.replace(' ', '+')}"
+    results = []
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        # Ищем карточки вакансий
+        items = soup.find_all('li', class_='vacancy-card')
+        for i in items[:limit]:
+            a = i.find('a', class_='vacancy-name')
+            if a:
+                title = a.text.strip()
+                link = "https://geekjob.ru" + a['href']
+                company = i.find('div', class_='company-name').text.strip() if i.find('div', class_='company-name') else "—"
+                pay = i.find('span', class_='salary').text.strip() if i.find('span', class_='salary') else "Договорная"
+                
+                results.append({
+                    'id': f"gj_{link.split('/')[-1]}",
+                    'text': f"👨‍💻 GeekJob: {title}\n💰 {pay} | {company}\n{link}",
+                    'Дата': datetime.now().strftime('%Y-%m-%d'),
+                    'Источник': 'GeekJob', 'Вакансия': title, 'Компания': company, 'Оплата': pay, 'Ссылка': link
+                })
+    except: pass
     return results
 
 def search_jobfilter(query, limit=5):
@@ -427,69 +463,88 @@ async def clear_subs(message: types.Message):
 
 @dp.message_handler()
 async def manual_search(message: types.Message):
-    # Если случайно придет неизвестная команда (напр. /help), 
-    # поиск её проигнорирует
+    # Игнорируем команды
     if message.text.startswith('/'):
         return
-    query = message.text
-    wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
     
-    # 1. Сбор данных
-    tg_hist = []
-    try: tg_hist = await search_telegram_history(query, limit_per_channel=5)
-    except: pass
+    query = message.text
+    # Создаем стартовое сообщение
+    wait = await message.answer(f"🔎 Начинаю поиск по запросу: `{query}`...")
+    
+    all_found = []
+    seen_ids = set()
 
-    hh, sj, hb, jf = [], [], [], []
+    # --- ЭТАП 1: ТЕЛЕГРАМ КАНАЛЫ (Архивы) ---
+    await wait.edit_text(f"📡 Проверяю архивы {len(CHANNELS)} каналов...")
+    
+    tg_hist = []
+    try:
+        tg_hist = await search_telegram_history(query, limit_per_channel=5)
+        if tg_hist:
+            for job in tg_hist:
+                if job['id'] not in seen_ids:
+                    all_found.append(job)
+                    seen_ids.add(job['id'])
+            
+            # СРАЗУ выводим первые 4 результата из TG
+            for j in tg_hist[:4]:
+                await message.answer(j['text'], disable_web_page_preview=True)
+                await asyncio.sleep(0.2)
+    except Exception as e:
+        logging.error(f"TG History error: {e}")
+
+    # --- ЭТАП 2: САЙТЫ (HH, SJ, Habr, GeekJob, JobFilter) ---
+    await wait.edit_text(f"🌐 Опрашиваю HH.ru, SuperJob, Habr и GeekJob...")
+    
+    hh, sj, hb, gj, jf = [], [], [], [], []
     try: hh = search_hh(query, 80)
     except: pass
     try: sj = search_superjob(query, 40)
     except: pass
     try: hb = search_habr(query, 30)
     except: pass
-    try: jf = search_jobfilter(query, 20)
+    try: 
+        # Если метод search_geekjob еще не добавлен, эта строка просто не сработает
+        gj = search_geekjob(query, 15) 
     except: pass
-    
-    # ФИЛЬТР ДУБЛИКАТОВ (чтобы одна и та же вакансия не вышла дважды)
-    all_raw = tg_hist + hh + sj + hb + jf
-    seen_ids = set()
-    all_found = []
-    for job in all_raw:
+    try: jf = search_jobfilter(query, 15)
+    except: pass
+
+    # Собираем всё в общую базу для Excel и фильтруем дубли
+    sites_raw = hh + sj + hb + gj + jf
+    for job in sites_raw:
         if job['id'] not in seen_ids:
             all_found.append(job)
             seen_ids.add(job['id'])
-    
+
+    # Довыводим в чат по 3 лучших вакансии с каждого сайта (итого еще ~12 сообщений)
+    for source in [hh[:3], sj[:3], hb[:2], gj[:2]]:
+        for j in source:
+            # Выводим только если мы еще не кидали это сообщение выше
+            await message.answer(j['text'], disable_web_page_preview=True)
+            await asyncio.sleep(0.2)
+
     if not all_found:
-        await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
+        await wait.edit_text(f"По запросу '{query}' ничего не найдено. Попробуй другое слово.")
         return
 
-    # 2. РАСПРЕДЕЛЕНИЕ (по 4 из каждого источника, но только уникальные)
-    top_mix = []
-    for source in [tg_hist, hh, sj, hb, jf]:
-        added = 0
-        for item in source:
-            if added < 4 and item in all_found:
-                top_mix.append(item)
-                added += 1
-
-    for j in top_mix[:20]:
-        try:
-            await message.answer(j['text'], disable_web_page_preview=True)
-            await asyncio.sleep(0.2) 
-        except: pass
-
-    # 3. Excel-отчет
+    # --- ЭТАП 3: ФИНАЛИЗАЦИЯ И EXCEL ---
+    await wait.edit_text(f"📊 Сбор завершен! Формирую отчет...")
+    
     excel_file = generate_excel(all_found)
     if excel_file:
         await message.answer_document(
             types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"📊 Найдено уникальных вакансий: {len(all_found)}\n(Собрано из сайтов и каналов)"
+            caption=f"✅ Найдено вакансий: {len(all_found)}\n(54 канала + 5 сайтов)"
         )
 
-    # 4. Кнопка подписки
+    # Кнопка подписки
     kb = types.InlineKeyboardMarkup().add(
         types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
     )
     await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
+    
+    # Удаляем служебное сообщение "Начинаю поиск..."
     await wait.delete()
 
 # --- ОБРАБОТЧИК КНОПКИ ПОДПИСКИ ---
