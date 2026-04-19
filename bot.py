@@ -3,6 +3,7 @@ import asyncio
 import logging
 import requests
 import sqlite3
+import html 
 import pandas as pd
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types
