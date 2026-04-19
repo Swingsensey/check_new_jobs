@@ -83,43 +83,42 @@ def is_new_job(job_id):
 
 # --- ПАРСЕРЫ ---
 async def search_telegram_history(query, limit_per_channel=5):
-    # Обязательно проверяем подключение
     if not client.is_connected():
         try: await client.connect()
         except: return []
 
     results = []
-    # Обработка е/ё (чтобы находил и режиссЕра и режиссЁра)
     query_low = query.lower().replace('ё', 'е')
     
-    # Идем по ВСЕМ каналам из списка
-    for channel in CHANNELS:
+    # Чтобы не получить бан, мы ищем в истории только первых 20 каналов.
+    # Остальные 40 каналов бот будет мониторить ТОЛЬКО в реальном времени.
+    safe_search_list = CHANNELS[:20] 
+
+    for channel in safe_search_list:
         try:
-            # Ищем последние сообщения
             async for msg in client.iter_messages(channel, limit=limit_per_channel):
                 if msg.text:
-                    # Приводим текст поста к нижнему регистру и убираем ё для сравнения
                     msg_text_check = msg.text.lower().replace('ё', 'е')
-                    
                     if query_low in msg_text_check:
                         results.append({
                             'id': f"tg_{channel}_{msg.id}",
                             'text': f"📱 TG [{channel}]: {msg.text[:400]}...\nhttps://t.me/{channel}/{msg.id}",
                             'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "—",
                             'Источник': f'TG: {channel}',
-                            'Вакансия': 'Пост из канала',
+                            'Вакансия': 'Архив канала',
                             'Компания': channel,
                             'Оплата': 'В посте',
                             'Ссылка': f"https://t.me/{channel}/{msg.id}"
                         })
             
-            # Крошечная пауза 0.1 сек, чтобы не злить Telegram при опросе 60 каналов
-            await asyncio.sleep(0.1) 
+            # Увеличиваем паузу до 0.5 сек. Это критически важно для 20+ каналов!
+            await asyncio.sleep(0.5) 
             
         except Exception as e:
-            # ГЛАВНОЕ ИЗМЕНЕНИЕ: Если один канал выдал ошибку, мы пишем лог 
-            # и идем К СЛЕДУЮЩЕМУ (continue), а не выходим из функции (return)!
             logging.error(f"Ошибка в канале {channel}: {e}")
+            # Если словили FloodWait даже на 20 каналах - выходим, чтобы не усугублять
+            if "flood" in str(e).lower():
+                break
             continue 
             
     return results
