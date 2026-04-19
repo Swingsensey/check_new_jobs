@@ -2,6 +2,8 @@ aiogram==2.25.1
 telethon
 requests
 beautifulsoup4
+lxml
 pandas
 openpyxl
 aiohttp
+python-dotenv
