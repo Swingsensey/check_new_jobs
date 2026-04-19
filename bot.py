@@ -483,42 +483,39 @@ async def clear_subs(message: types.Message):
 
 @dp.message_handler()
 async def manual_search(message: types.Message):
+    # Игнорируем команды
     if message.text.startswith('/'):
         return
     
     query = message.text
+    # Используем твой стиль приветствия, но с обновлением статуса
     wait = await message.answer(f"🔎 Начинаю поиск по запросу: `{query}`...")
     
     all_found = []
     seen_ids = set()
 
-    # --- ЭТАП 1: ТЕЛЕГРАМ (Архивы) ---
-    await wait.edit_text(f"📡 Проверяю архивы {len(CHANNELS)} каналов...")
-    
+    # --- 1. СБОР ТЕЛЕГРАМ (Архивы) ---
     try:
-        # Проверка подключения клиента
-        if not client.is_connected():
-            await client.connect()
-            
-        tg_hist = await search_telegram_history(query, limit_per_channel=5)
-        
-        if tg_hist:
-            for job in tg_hist:
-                if job['id'] not in seen_ids:
-                    all_found.append(job)
-                    seen_ids.add(job['id'])
-            
-            # Сразу выводим 4 лучших из ТГ
-            for j in tg_hist[:4]:
-                await message.answer(j['text'], disable_web_page_preview=True)
-                await asyncio.sleep(0.2)
+        # Проверяем, что клиент Telethon готов к работе
+        if client.is_connected():
+            await wait.edit_text(f"📡 Проверяю архивы {len(CHANNELS)} каналов...")
+            tg_hist = await search_telegram_history(query, limit_per_channel=5)
+            if tg_hist:
+                for job in tg_hist:
+                    if job['id'] not in seen_ids:
+                        all_found.append(job)
+                        seen_ids.add(job['id'])
+                # Сразу выводим пару штук из ТГ
+                for j in tg_hist[:3]:
+                    await message.answer(j['text'], disable_web_page_preview=True)
     except Exception as e:
-        logging.error(f"Ошибка поиска в ТГ: {e}")
+        logging.error(f"TG History error: {e}")
+        # Если ТГ упал (FloodWait), просто идем дальше
 
-    # --- ЭТАП 2: САЙТЫ (HH, SJ, Habr, JobFilter) ---
-    await wait.edit_text(f"🌐 Опрашиваю сайты HH, SuperJob, Habr...")
+    # --- 2. СБОР САЙТОВ (Твой работающий блок) ---
+    await wait.edit_text(f"🌐 Опрашиваю HH.ru, SuperJob, Habr и GeekJob...")
     
-    # ИСПРАВЛЕНО: Теперь переменных столько же, сколько списков
+    # ИСПРАВЛЕНО: 4 переменных = 4 списка
     hh, sj, hb, jf = [], [], [], []
     
     try: hh = search_hh(query, 80)
@@ -527,41 +524,50 @@ async def manual_search(message: types.Message):
     except: pass
     try: hb = search_habr(query, 30)
     except: pass
-    try: jf = search_jobfilter(query, 15)
+    try: jf = search_jobfilter(query, 20)
     except: pass
-
-    # Собираем данные с сайтов
+    
+    # Добавляем в общий список
     sites_raw = hh + sj + hb + jf
     for job in sites_raw:
         if job['id'] not in seen_ids:
             all_found.append(job)
             seen_ids.add(job['id'])
 
-    # Выводим по 2 лучшие вакансии с каждого сайта в чат
-    for source in [hh[:2], sj[:2], hb[:2]]:
-        for j in source:
-            await message.answer(j['text'], disable_web_page_preview=True)
-            await asyncio.sleep(0.2)
-
     if not all_found:
         await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
         return
 
-    # --- ЭТАП 3: ФИНАЛИЗАЦИЯ ---
-    await wait.edit_text(f"📊 Сбор завершен! Формирую отчет...")
-    
+    # --- 3. ВЫВОД ТОП-20 (Твой стиль распределения) ---
+    top_mix = []
+    # Берем по 4 из каждого источника (как в твоем оригинале)
+    for source in [tg_hist if 'tg_hist' in locals() else [], hh, sj, hb, jf]:
+        added = 0
+        for item in source:
+            if added < 4 and item in all_found:
+                top_mix.append(item)
+                added += 1
+
+    # Отправляем сообщения (макс 20)
+    for j in top_mix[:20]:
+        try:
+            await message.answer(j['text'], disable_web_page_preview=True)
+            await asyncio.sleep(0.2) 
+        except: pass
+
+    # --- 4. EXCEL И КНОПКА ---
+    await wait.edit_text(f"📊 Формирую отчет...")
     excel_file = generate_excel(all_found)
     if excel_file:
         await message.answer_document(
             types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"✅ Найдено вакансий: {len(all_found)}\n(54 канала + сайты)"
+            caption=f"📊 Найдено уникальных вакансий: {len(all_found)}\n(54 канала + сайты)"
         )
 
     kb = types.InlineKeyboardMarkup().add(
         types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
     )
     await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
-    
     await wait.delete()
     
 async def handle(request):
