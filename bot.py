@@ -83,11 +83,21 @@ def is_new_job(job_id):
 
 # --- ПАРСЕРЫ ---
 async def search_telegram_history(query, limit_per_channel=5):
+    # 1. Защита от вылета (проверяем подключение)
+    if not client.is_connected():
+        try: await client.connect()
+        except: return []
+
     results = []
     query_low = query.lower()
-    for channel in CHANNELS:
+    
+    # 2. ГЛАВНОЕ: Ограничиваем список для ГЛУБОКОГО поиска
+    # Мы будем рыться в истории только первых 20 каналов. 
+    # Все 60 каналов будут проверяться ТОЛЬКО в live-режиме (когда выйдет новый пост).
+    search_list = CHANNELS[:20] 
+
+    for channel in search_list:
         try:
-            # Метод iter_messages просматривает последние сообщения в канале
             async for msg in client.iter_messages(channel, limit=limit_per_channel):
                 if msg.text and query_low in msg.text.lower():
                     results.append({
@@ -100,8 +110,13 @@ async def search_telegram_history(query, limit_per_channel=5):
                         'Оплата': 'В посте',
                         'Ссылка': f"https://t.me/{channel}/{msg.id}"
                     })
+            # 3. МИКРО-ПАУЗА (без неё Telegram тебя забанит за спам-запросы)
+            await asyncio.sleep(0.3) 
+            
         except Exception as e:
             logging.error(f"Ошибка поиска в архиве {channel}: {e}")
+            continue # Идем к следующему каналу, если этот недоступен
+            
     return results
 
 def search_hh(query, limit=100):
@@ -479,7 +494,11 @@ async def manual_search(message: types.Message):
     
     tg_hist = []
     try:
-        tg_hist = await search_telegram_history(query, limit_per_channel=5)
+        # Даем боту понять, что если ТГ не готов, мы просто пропускаем этот этап
+        if client.is_connected():
+            tg_hist = await search_telegram_history(query, limit_per_channel=5)
+    except Exception as e:
+        logging.error(f"Глобальная ошибка поиска ТГ: {e}")
         if tg_hist:
             for job in tg_hist:
                 if job['id'] not in seen_ids:
