@@ -13,7 +13,9 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from openpyxl.styles import Font, PatternFill, Alignment
-
+from telethon.errors import FloodWaitError
+from aiogram.utils.exceptions import MessageNotModified
+from contextlib import suppress
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
 API_ID = 23009673
@@ -82,44 +84,50 @@ def is_new_job(job_id):
     return False
 
 # --- ПАРСЕРЫ ---
-async def search_telegram_history(query, limit_per_channel=5):
+async def search_telegram_history(query, limit_per_channel=10):
+    """
+    Гениальный поиск: использует серверный поиск Telegram.
+    """
+    # Проверяем подключение
     if not client.is_connected():
-        try: await client.connect()
-        except: return []
+        try:
+            await client.start()
+        except Exception as e:
+            logging.error(f"Не удалось запустить Telethon: {e}")
+            return []
 
     results = []
-    query_low = query.lower().replace('ё', 'е')
+    # Ограничиваем список каналов для стабильности
+    safe_search_list = CHANNELS[:25] 
     
-    # Чтобы не получить бан, мы ищем в истории только первых 20 каналов.
-    # Остальные 40 каналов бот будет мониторить ТОЛЬКО в реальном времени.
-    safe_search_list = CHANNELS[:20] 
-
     for channel in safe_search_list:
         try:
-            async for msg in client.iter_messages(channel, limit=limit_per_channel):
-                if msg.text:
-                    msg_text_check = msg.text.lower().replace('ё', 'е')
-                    if query_low in msg_text_check:
-                        results.append({
-                            'id': f"tg_{channel}_{msg.id}",
-                            'text': f"📱 TG [{channel}]: {msg.text[:400]}...\nhttps://t.me/{channel}/{msg.id}",
-                            'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "—",
-                            'Источник': f'TG: {channel}',
-                            'Вакансия': 'Архив канала',
-                            'Компания': channel,
-                            'Оплата': 'В посте',
-                            'Ссылка': f"https://t.me/{channel}/{msg.id}"
-                        })
+            # ВАЖНО: search=query заставляет Telegram искать на своих серверах
+            async for msg in client.iter_messages(channel, search=query, limit=limit_per_channel):
+                if msg.text and len(msg.text) > 10:
+                    # Формируем ID для исключения дублей
+                    clean_id = f"tg_{channel}_{msg.id}"
+                    
+                    results.append({
+                        'id': clean_id,
+                        'text': f"📱 **TG [{channel}]**: {msg.text[:500]}...\n\n🔗 [Открыть вакансию](https://t.me/{channel}/{msg.id})",
+                        'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "—",
+                        'Источник': f'TG: {channel}',
+                        'Вакансия': query.capitalize(),
+                        'Компания': channel,
+                        'Оплата': 'См. в посте',
+                        'Ссылка': f"https://t.me/{channel}/{msg.id}"
+                    })
             
-            # Увеличиваем паузу до 0.5 сек. Это критически важно для 20+ каналов!
-            await asyncio.sleep(0.5) 
-            
+            # Короткая пауза, чтобы Telegram не прислал FloodWait
+            await asyncio.sleep(0.3)
+
+        except FloodWaitError as e:
+            logging.warning(f"Замедление Telegram на {e.seconds} сек.")
+            await asyncio.sleep(e.seconds)
         except Exception as e:
-            logging.error(f"Ошибка в канале {channel}: {e}")
-            # Если словили FloodWait даже на 20 каналах - выходим, чтобы не усугублять
-            if "flood" in str(e).lower():
-                break
-            continue 
+            logging.error(f"Ошибка поиска в канале {channel}: {e}")
+            continue
             
     return results
     
@@ -168,6 +176,7 @@ def search_superjob(query, limit=50):
     except Exception as e:
         logging.error(f"SJ error: {e}")
     return results
+    
 def search_habr(query, limit=20):
     # Москва = 678, тип вакансий = все
     url = f"https://career.habr.com/vacancies?q={query}&city_id=678&type=all"
@@ -482,92 +491,101 @@ async def clear_subs(message: types.Message):
 
 @dp.message_handler()
 async def manual_search(message: types.Message):
-    # Игнорируем команды
-    if message.text.startswith('/'):
-        return
+    if message.text.startswith('/'): return
     
     query = message.text
-    # Используем твой стиль приветствия, но с обновлением статуса
-    wait = await message.answer(f"🔎 Начинаю поиск по запросу: `{query}`...")
+    # Используем HTML-разметку (<b>, <i>, <code>)
+    status_msg = await message.answer(f"🔎 <b>Ищу вакансии по запросу:</b> <code>{query}</code>...", parse_mode="HTML")
     
     all_found = []
     seen_ids = set()
 
-    # --- 1. СБОР ТЕЛЕГРАМ (Архивы) ---
+    # 1. Параллельный сбор с сайтов
+    with suppress(MessageNotModified):
+        await status_msg.edit_text("🌐 Опрашиваю сайты (HH, SuperJob, Habr, GeekJob)...", parse_mode="HTML")
+    
+    loop = asyncio.get_running_loop()
     try:
-        # Проверяем, что клиент Telethon готов к работе
-        if client.is_connected():
-            await wait.edit_text(f"📡 Проверяю архивы {len(CHANNELS)} каналов...")
-            tg_hist = await search_telegram_history(query, limit_per_channel=5)
-            if tg_hist:
-                for job in tg_hist:
-                    if job['id'] not in seen_ids:
+        tasks = [
+            loop.run_in_executor(None, search_hh, query, 50),
+            loop.run_in_executor(None, search_superjob, query, 30),
+            loop.run_in_executor(None, search_habr, query, 20),
+            loop.run_in_executor(None, search_jobfilter, query, 20)
+        ]
+        
+        sites_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for res in sites_results:
+            if isinstance(res, list):
+                for job in res:
+                    if job.get('id') and job['id'] not in seen_ids:
                         all_found.append(job)
                         seen_ids.add(job['id'])
-                # Сразу выводим пару штук из ТГ
-                for j in tg_hist[:3]:
-                    await message.answer(j['text'], disable_web_page_preview=True)
+            elif isinstance(res, Exception):
+                logging.error(f"Ошибка парсера: {res}")
     except Exception as e:
-        logging.error(f"TG History error: {e}")
-        # Если ТГ упал (FloodWait), просто идем дальше
+        logging.error(f"Ошибка параллельного парсинга: {e}")
 
-    # --- 2. СБОР САЙТОВ (Твой работающий блок) ---
-    await wait.edit_text(f"🌐 Опрашиваю HH.ru, SuperJob, Habr и GeekJob...")
+    # 2. Сбор из Telegram (Архивы)
+    with suppress(MessageNotModified):
+        await status_msg.edit_text(f"📡 Проверяю архивы каналов... (Найдено: <b>{len(all_found)}</b>)", parse_mode="HTML")
     
-    # ИСПРАВЛЕНО: 4 переменных = 4 списка
-    hh, sj, hb, jf = [], [], [], []
-    
-    try: hh = search_hh(query, 80)
-    except: pass
-    try: sj = search_superjob(query, 40)
-    except: pass
-    try: hb = search_habr(query, 30)
-    except: pass
-    try: jf = search_jobfilter(query, 20)
-    except: pass
-    
-    # Добавляем в общий список
-    sites_raw = hh + sj + hb + jf
-    for job in sites_raw:
-        if job['id'] not in seen_ids:
-            all_found.append(job)
-            seen_ids.add(job['id'])
+    try:
+        tg_hist = await search_telegram_history(query)
+        if tg_hist:
+            for job in tg_hist:
+                if job['id'] not in seen_ids:
+                    all_found.append(job)
+                    seen_ids.add(job['id'])
+    except Exception as e:
+        logging.error(f"Ошибка TG: {e}")
 
     if not all_found:
-        await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
+        await status_msg.edit_text(f"❌ По запросу '<b>{query}</b>' ничего не найдено.", parse_mode="HTML")
         return
 
-    # --- 3. ВЫВОД ТОП-20 (Твой стиль распределения) ---
-    top_mix = []
-    # Берем по 4 из каждого источника (как в твоем оригинале)
-    for source in [tg_hist if 'tg_hist' in locals() else [], hh, sj, hb, jf]:
-        added = 0
-        for item in source:
-            if added < 4 and item in all_found:
-                top_mix.append(item)
-                added += 1
+    # 3. Вывод результатов
+    with suppress(MessageNotModified):
+        await status_msg.edit_text("📤 Отправляю лучшие результаты...", parse_mode="HTML")
+    
+    # Берем топ-15
+    top_results = all_found[:15] 
 
-    # Отправляем сообщения (макс 20)
-    for j in top_mix[:20]:
+    for j in top_results:
         try:
-            await message.answer(j['text'], disable_web_page_preview=True)
-            await asyncio.sleep(0.2) 
-        except: pass
+            # j['text'] должен быть подготовлен под HTML или очищен
+            # Если в j['text'] есть < или >, их нужно экранировать: .replace("<", "&lt;")
+            safe_text = j['text']
+            await message.answer(safe_text, disable_web_page_preview=True, parse_mode="HTML")
+            await asyncio.sleep(0.3) # Чуть увеличили паузу для защиты от Flood
+        except Exception as e:
+            # Если HTML упал (например, из-за некорректных тегов в описании), шлем текстом
+            await message.answer(j['text'][:4000], disable_web_page_preview=True)
+            logging.error(f"Ошибка отправки сообщения: {e}")
 
-    # --- 4. EXCEL И КНОПКА ---
-    await wait.edit_text(f"📊 Формирую отчет...")
-    excel_file = generate_excel(all_found)
-    if excel_file:
-        await message.answer_document(
-            types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"📊 Найдено уникальных вакансий: {len(all_found)}\n(54 канала + сайты)"
-        )
+    # 4. Генерация отчета и завершение
+    with suppress(MessageNotModified):
+        await status_msg.edit_text("📊 Формирую Excel-отчет...", parse_mode="HTML")
+        
+    try:
+        # Убедись, что generate_excel возвращает путь к файлу или BytesIO
+        excel_file = generate_excel(all_found)
+        if excel_file:
+            kb = types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
+            )
+            await message.answer_document(
+                types.InputFile(excel_file, filename=f"Jobs_{query}.xlsx"),
+                caption=f"✅ Готово!\nНайдено: <b>{len(all_found)}</b>\nПоказано: <b>{len(top_results)}</b>",
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logging.error(f"Excel error: {e}")
+        await message.answer(f"✅ Поиск завершен. Найдено уникальных вакансий: {len(all_found)}")
 
-    kb = types.InlineKeyboardMarkup().add(
-        types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
-    )
-    await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
-    await wait.delete()
+    # Удаляем сообщение о поиске в конце
+    await status_msg.delete()
     
 async def handle(request):
     return web.Response(text="Bot is running!")
