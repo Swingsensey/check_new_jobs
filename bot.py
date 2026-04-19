@@ -83,42 +83,47 @@ def is_new_job(job_id):
 
 # --- ПАРСЕРЫ ---
 async def search_telegram_history(query, limit_per_channel=5):
-    # 1. Защита от вылета (проверяем подключение)
+    # Обязательно проверяем подключение
     if not client.is_connected():
         try: await client.connect()
         except: return []
 
     results = []
-    query_low = query.lower()
+    # Обработка е/ё (чтобы находил и режиссЕра и режиссЁра)
+    query_low = query.lower().replace('ё', 'е')
     
-    # 2. ГЛАВНОЕ: Ограничиваем список для ГЛУБОКОГО поиска
-    # Мы будем рыться в истории только первых 20 каналов. 
-    # Все 60 каналов будут проверяться ТОЛЬКО в live-режиме (когда выйдет новый пост).
-    search_list = CHANNELS[:20] 
-
-    for channel in search_list:
+    # Идем по ВСЕМ каналам из списка
+    for channel in CHANNELS:
         try:
+            # Ищем последние сообщения
             async for msg in client.iter_messages(channel, limit=limit_per_channel):
-                if msg.text and query_low in msg.text.lower():
-                    results.append({
-                        'id': f"tg_hist_{channel}_{msg.id}",
-                        'text': f"📱 TG [{channel}]: {msg.text[:400]}...\nhttps://t.me/{channel}/{msg.id}",
-                        'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "Неизвестно",
-                        'Источник': f'TG: {channel}',
-                        'Вакансия': 'Архив канала',
-                        'Компания': channel,
-                        'Оплата': 'В посте',
-                        'Ссылка': f"https://t.me/{channel}/{msg.id}"
-                    })
-            # 3. МИКРО-ПАУЗА (без неё Telegram тебя забанит за спам-запросы)
-            await asyncio.sleep(0.3) 
+                if msg.text:
+                    # Приводим текст поста к нижнему регистру и убираем ё для сравнения
+                    msg_text_check = msg.text.lower().replace('ё', 'е')
+                    
+                    if query_low in msg_text_check:
+                        results.append({
+                            'id': f"tg_{channel}_{msg.id}",
+                            'text': f"📱 TG [{channel}]: {msg.text[:400]}...\nhttps://t.me/{channel}/{msg.id}",
+                            'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "—",
+                            'Источник': f'TG: {channel}',
+                            'Вакансия': 'Пост из канала',
+                            'Компания': channel,
+                            'Оплата': 'В посте',
+                            'Ссылка': f"https://t.me/{channel}/{msg.id}"
+                        })
+            
+            # Крошечная пауза 0.1 сек, чтобы не злить Telegram при опросе 60 каналов
+            await asyncio.sleep(0.1) 
             
         except Exception as e:
-            logging.error(f"Ошибка поиска в архиве {channel}: {e}")
-            continue # Идем к следующему каналу, если этот недоступен
+            # ГЛАВНОЕ ИЗМЕНЕНИЕ: Если один канал выдал ошибку, мы пишем лог 
+            # и идем К СЛЕДУЮЩЕМУ (continue), а не выходим из функции (return)!
+            logging.error(f"Ошибка в канале {channel}: {e}")
+            continue 
             
     return results
-
+    
 def search_hh(query, limit=100):
     url = f"https://api.hh.ru/vacancies?text={query}&search_field=name&area=1&per_page={limit}&order_by=publication_time"
     results = []
