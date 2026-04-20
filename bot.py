@@ -25,7 +25,17 @@ CHANNELS = [
     'vdhl_good', 'mediajobs_ru', 'work_in_media', 'moviestart_ru', 'distantsiya',
     'theblueprintcareer', 'huggabletalents', 'careerspace', 'morejobs', 'heyanie', 
     'marketing_jobs', 'mirkreatorovjob', 'budujobs', 'normrabota', 'jobpower', 
-    'it_vakansii_jobs', 'workasap', 'forproducer', 'vacanciesrus'
+    'it_vakansii_jobs', 'workasap', 'forproducer', 'vacanciesrus', 
+    'honeyiwantmoney', 'evacuatejobs', 'workinart', 'young_relocate', 'iRecommendWork_IT',
+    'Inwork', 'cliquejobs', 'fashionfaculty', 'forallmedia', 'vitrinajobs',
+    'dnative_job', 'Young_and_Yandex', 'digital_rabota', 'jobforpr', 'megafonjobs',
+    'cozy_hr', 'rassvet_pro', 'young_june', 'mtsfintechjobs', 'digital_hr',
+    'zdemcv', 'foranalysts', 'hcareers_jobs', 'product_jobs', 'edujobs',
+    'talentswanted', 'forchiefs', 'rabota_marketing_juniors', 'tj_collega', 'remotegeekjob',
+    'forallmarketing', 'hsecareer', 'dddwork', 'ya_jobs_pm', 'forproducts',
+    'practicum_experts', 'zloy_kollega', 'jobforjunior', 'vacantcist', 'avito_career',
+    'workasap', 'mirkreatorovjob', 'careerspace', 'huggabletalents', 'theblueprintcareer',
+    'heyanie', 'marketing_jobs', 'it_vakansii_jobs'
 ]
 
 # Создаем клиента для чтения каналов
