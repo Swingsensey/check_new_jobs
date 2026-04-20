@@ -86,50 +86,41 @@ def is_new_job(job_id):
 
 # --- ПАРСЕРЫ ---
 async def search_telegram_history(query, limit_per_channel=10):
-    """
-    Гениальный поиск: использует серверный поиск Telegram.
-    """
-    # Проверяем подключение
     if not client.is_connected():
-        try:
-            await client.start()
-        except Exception as e:
-            logging.error(f"Не удалось запустить Telethon: {e}")
-            return []
+        await client.start()
 
     results = []
-    # Ограничиваем список каналов для стабильности
+    seen_texts = set() # Защита от одинаковых постов
     safe_search_list = CHANNELS[:25] 
-    
+
     for channel in safe_search_list:
         try:
-            # ВАЖНО: search=query заставляет Telegram искать на своих серверах
             async for msg in client.iter_messages(channel, search=query, limit=limit_per_channel):
-                if msg.text and len(msg.text) > 10:
-                    # Формируем ID для исключения дублей
-                    clean_id = f"tg_{channel}_{msg.id}"
-                    
+                if msg.text and len(msg.text) > 20:
+                    # Умная проверка на дубли по первым 100 символам текста
+                    text_snippet = msg.text[:100].lower().strip()
+                    if text_snippet in seen_texts:
+                        continue
+                    seen_texts.add(text_snippet)
+
+                    # Пытаемся найти зарплату в тексте (простой поиск цифр с валютой)
+                    import re
+                    salary_match = re.search(r'(\d[\d\s]*[0-9])\s?(\$|руб|€|₽|byn)', msg.text.lower())
+                    salary = salary_match.group(0) if salary_match else "См. в посте"
+
                     results.append({
-                        'id': clean_id,
+                        'id': f"tg_{channel}_{msg.id}",
                         'text': f"📱 **TG [{channel}]**: {msg.text[:500]}...\n\n🔗 [Открыть вакансию](https://t.me/{channel}/{msg.id})",
-                        'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "—",
+                        'Дата': msg.date.strftime('%Y-%m-%d'),
                         'Источник': f'TG: {channel}',
                         'Вакансия': query.capitalize(),
                         'Компания': channel,
-                        'Оплата': 'См. в посте',
+                        'Оплата': salary, # Теперь не просто текст, а поиск цифр
                         'Ссылка': f"https://t.me/{channel}/{msg.id}"
                     })
-            
-            # Короткая пауза, чтобы Telegram не прислал FloodWait
             await asyncio.sleep(0.3)
-
-        except FloodWaitError as e:
-            logging.warning(f"Замедление Telegram на {e.seconds} сек.")
-            await asyncio.sleep(e.seconds)
         except Exception as e:
-            logging.error(f"Ошибка поиска в канале {channel}: {e}")
-            continue
-            
+            logging.error(f"Ошибка TG {channel}: {e}")
     return results
     
 def search_hh(query, limit=100):
@@ -251,28 +242,37 @@ def search_geekjob(query, limit=10):
     except: pass
     return results
 
-def search_jobfilter(query, limit=5):
-    url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
+def search_jobfilter(query, limit=10):
+    url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}"
     results = []
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
-        items = soup.find_all('div', class_='vacancy_item') or soup.find_all('div', class_='vacancy-item')
+        # Пытаемся найти карточки (у них часто меняются классы)
+        items = soup.select('.vacancy_item, .vacancy-item, [class*="vacancy"]')
+        
         for i in items[:limit]:
             a = i.find('a')
-            if a:
-                link = "https://jobfilter.ru" + a['href'] if not a['href'].startswith('http') else a['href']
-                results.append({
-                    'id': f"jf_{a['href'][-10:]}",
-                    'text': f"🌐 JF: {a.text.strip()}\n{link}",
-                    'Дата': datetime.now().strftime('%Y-%m-%d'), # Добавили поле
-                    'Источник': 'JobFilter', # Добавили поле
-                    'Вакансия': a.text.strip(), # Добавили поле
-                    'Компания': '—', # Добавили поле
-                    'Оплата': 'См. на сайте', # Добавили поле
-                    'Ссылка': link
-                })
-    except: pass
+            if not a: continue
+            
+            title = a.text.strip()
+            link = a['href'] if a['href'].startswith('http') else "https://jobfilter.ru" + a['href']
+            
+            # Пытаемся найти компанию и оплату в соседних тегах
+            salary = i.find(text=re.compile(r'\d')) if i.find(text=re.compile(r'\d')) else "—"
+
+            results.append({
+                'id': f"jf_{hash(link)}", # Безопасный ID
+                'text': f"🌐 **JobFilter**: {title}\n{link}",
+                'Дата': datetime.now().strftime('%Y-%m-%d'),
+                'Источник': 'JobFilter',
+                'Вакансия': title,
+                'Компания': '—',
+                'Оплата': 'См. на сайте',
+                'Ссылка': link
+            })
+    except Exception as e:
+        logging.error(f"JobFilter error: {e}")
     return results
 
 @client.on(events.NewMessage(chats=CHANNELS))
@@ -372,38 +372,59 @@ async def monitor_sites():
 
 def generate_excel(data):
     try:
+        if not data:
+            return None
+            
         raw_data = []
         for item in data:
-            # Используем .get(), чтобы бот не падал, если поля нет
+            # Используем str() для защиты от объектов BS4
             raw_data.append({
-                'Дата': item.get('Дата', '—'),
-                'Источник': item.get('Источник', '—'),
-                'Вакансия': item.get('Вакансия', '—'),
-                'Компания': item.get('Компания', '—'),
-                'Оплата': item.get('Оплата', '—'),
-                'Ссылка': item.get('Ссылка', '—')
+                'Дата': str(item.get('Дата', '—')),
+                'Источник': str(item.get('Источник', '—')),
+                'Вакансия': str(item.get('Вакансия', '—')),
+                'Компания': str(item.get('Компания', '—')),
+                'Оплата': str(item.get('Оплата', '—')),
+                'Ссылка': str(item.get('Ссылка', '—'))
             })
 
         df = pd.DataFrame(raw_data)
-        if not df.empty and 'Дата' in df.columns:
-            df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
-            df = df.sort_values(by='Дата', ascending=False)
         
+        if not df.empty:
+            # Пытаемся превратить строку в дату для правильной сортировки
+            # errors='coerce' превратит плохие даты в NaT (пустоту), и бот не упадет
+            df['TempDate'] = pd.to_datetime(df['Дата'], errors='coerce')
+            df = df.sort_values(by='TempDate', ascending=False)
+            df = df.drop(columns=['TempDate']) # Удаляем временную колонку
+
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Вакансии')
             ws = writer.sheets['Вакансии']
-            fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
-            font = Font(color="FFFFFF", bold=True)
-            for col_num in range(len(df.columns)):
+            
+            # Оформление шапки
+            header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True)
+            
+            for col_num, column in enumerate(df.columns):
                 cell = ws.cell(row=1, column=col_num + 1)
-                cell.fill = fill; cell.font = font
-                ws.column_dimensions[chr(65 + col_num)].width = 35
+                cell.fill = header_fill
+                cell.font = header_font
+                
+                # Настройка ширины
+                col_letter = chr(65 + col_num)
+                if column == 'Ссылка':
+                    ws.column_dimensions[col_letter].width = 45
+                elif column == 'Вакансия':
+                    ws.column_dimensions[col_letter].width = 40
+                else:
+                    ws.column_dimensions[col_letter].width = 20
+
             ws.freeze_panes = 'A2'
+            
         output.seek(0)
         return output
     except Exception as e:
-        logging.error(f"Excel error: {e}")
+        logging.error(f"Ошибка генерации Excel: {e}")
         return None
 
 # --- ОБРАБОТЧИКИ ---
