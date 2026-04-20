@@ -87,55 +87,38 @@ def is_new_job(job_id):
 
 # --- ПАРСЕРЫ ---
 async def search_telegram_history(query, limit_per_channel=10):
-    # Лучше использовать start(), он надежнее connect()
-    if not client.is_connected(): 
-        await client.start()
-        
+    if not client.is_connected(): await client.start()
     results = []
-    seen_texts = set() 
+    seen_texts = set()
     
-    for channel in CHANNELS[:25]: 
+    for channel in CHANNELS[:25]:
         try:
-            # Ищем через серверный поиск Telegram
             async for msg in client.iter_messages(channel, search=query, limit=limit_per_channel):
-                if not msg.text or len(msg.text) < 30: # Игнорим слишком короткие посты
-                    continue
+                if not msg.text or len(msg.text) < 40: continue
                 
-                # Защита от дублей: нормализуем текст (убираем пробелы и ё)
-                text_id = msg.text[:70].lower().replace('ё', 'е').strip()
-                if text_id in seen_texts: 
-                    continue
+                # Защита от старья: если вакансии больше месяца — пропускаем (опционально)
+                # if (datetime.now() - msg.date.replace(tzinfo=None)).days > 30: continue
+
+                text_id = msg.text[:80].lower().strip()
+                if text_id in seen_texts: continue
                 seen_texts.add(text_id)
 
-                # Улучшенный поиск зарплаты (ищем цифры рядом с валютой)
-                # Ищет форматы: 100 000 руб, 2000$, от 150к и т.д.
+                # Ищем зарплату
                 pay = "Договорная"
-                salary_pattern = r'(\d[\d\s\.]*)\s?(руб|р\.|₽|\$|€|usd|eur|k|к)'
-                salary_found = re.search(salary_pattern, msg.text.lower())
-                if salary_found:
-                    pay = salary_found.group(0).strip()
+                salary_found = re.search(r'(\d[\d\s\.]*)\s?(руб|р\.|₽|\$|€|usd|eur|к)', msg.text.lower())
+                if salary_found: pay = salary_found.group(0).strip()
 
-                # ФОРМИРУЕМ ТЕКСТ (Важно: экранируем текст, чтобы не ломать разметку)
-                clean_content = msg.text[:150].replace('*', '').replace('_', '').strip()
-                
                 results.append({
                     'id': f"tg_{channel}_{msg.id}",
-                    # Используем Markdown-безопасный формат
-                    'text': f"📱 <b>TG [{channel}]</b>: {clean_content}...\n💰 <b>{pay}</b>\n\n🔗 https://t.me/{channel}/{msg.id}",
-                    'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "—",
+                    'Дата': msg.date.strftime('%Y-%m-%d'),
                     'Источник': f'TG: {channel}',
                     'Вакансия': query.capitalize(),
                     'Компания': channel,
                     'Оплата': pay,
-                    'Ссылка': f"https://t.me/{channel}/{msg.id}"
+                    'Ссылка': f"https://t.me/{channel}/{msg.id}",
+                    'snippet': msg.text[:120].replace('\n', ' ') # Короткое описание для чата
                 })
-            
-            await asyncio.sleep(0.3) 
-            
-        except Exception as e:
-            logging.error(f"Ошибка канала {channel}: {e}")
-            continue
-            
+        except: continue
     return results
     
 def search_hh(query, limit=100):
@@ -391,7 +374,7 @@ def generate_excel(data):
             
         raw_data = []
         for item in data:
-            # Используем str() для защиты от объектов BS4
+            # 1. Очищаем данные и убираем технические поля (id, text)
             raw_data.append({
                 'Дата': str(item.get('Дата', '—')),
                 'Источник': str(item.get('Источник', '—')),
@@ -403,28 +386,33 @@ def generate_excel(data):
 
         df = pd.DataFrame(raw_data)
         
+        # 2. Умная сортировка по дате
         if not df.empty:
-            # Пытаемся превратить строку в дату для правильной сортировки
-            # errors='coerce' превратит плохие даты в NaT (пустоту), и бот не упадет
+            # Создаем временную колонку для правильного сравнения дат
             df['TempDate'] = pd.to_datetime(df['Дата'], errors='coerce')
             df = df.sort_values(by='TempDate', ascending=False)
-            df = df.drop(columns=['TempDate']) # Удаляем временную колонку
+            df = df.drop(columns=['TempDate']) 
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Вакансии')
             ws = writer.sheets['Вакансии']
             
-            # Оформление шапки
+            # 3. Настройка оформления и ссылок
             header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
             header_font = Font(color="FFFFFF", bold=True)
+            link_font = Font(color="0000FF", underline="single") # Синий цвет для ссылок
             
+            # Находим индекс колонки "Ссылка"
+            link_col_idx = df.columns.get_loc("Ссылка") + 1 if "Ссылка" in df.columns else None
+
             for col_num, column in enumerate(df.columns):
+                # Оформляем шапку
                 cell = ws.cell(row=1, column=col_num + 1)
                 cell.fill = header_fill
                 cell.font = header_font
                 
-                # Настройка ширины
+                # Устанавливаем ширину колонок
                 col_letter = chr(65 + col_num)
                 if column == 'Ссылка':
                     ws.column_dimensions[col_letter].width = 45
@@ -433,12 +421,21 @@ def generate_excel(data):
                 else:
                     ws.column_dimensions[col_letter].width = 20
 
+            # 4. Делаем ссылки кликабельными
+            if link_col_idx:
+                for row in range(2, len(df) + 2):
+                    cell = ws.cell(row=row, column=link_col_idx)
+                    if cell.value and str(cell.value).startswith('http'):
+                        cell.hyperlink = cell.value
+                        cell.font = link_font
+
+            # Закрепляем первую строку
             ws.freeze_panes = 'A2'
             
         output.seek(0)
         return output
     except Exception as e:
-        logging.error(f"Ошибка генерации Excel: {e}")
+        logging.error(f"Критическая ошибка Excel: {e}")
         return None
 
 # --- ОБРАБОТЧИКИ ---
@@ -581,61 +578,51 @@ async def manual_search(message: types.Message):
         return
 
     # 3. Вывод результатов
-    with suppress(MessageNotModified):
-        await status_msg.edit_text("📤 <b>Отправляю лучшие результаты...</b>", parse_mode="HTML")
+    # СОРТИРУЕМ ВСЁ НАЙДЕННОЕ ПО ДАТЕ (Сначала новые)
+    all_found.sort(key=lambda x: x.get('Дата', ''), reverse=True)
     
-    top_results = all_found[:15] 
-
-    for j in top_results:
+    await status_msg.edit_text("📤 <b>Отправляю самые свежие результаты...</b>", parse_mode="HTML")
+    
+    for j in all_found[:15]:
         try:
-            # СОБИРАЕМ КРАСИВОЕ СООБЩЕНИЕ ИЗ ПОЛЕЙ
-            # Экранируем только данные, чтобы не упал HTML
-            v_name = html.escape(str(j.get('Вакансия', 'Вакансия')))
+            v_src = j.get('Источник', '')
+            # Возвращаем нормальные логотипы
+            icon = "🔴" if "HH" in v_src else "🔵" if "SJ" in v_src else "🟢" if "Habr" in v_src else "📱"
+            
+            v_name = html.escape(str(j.get('Вакансия', '—')))
             v_pay = html.escape(str(j.get('Оплата', 'Договорная')))
             v_comp = html.escape(str(j.get('Компания', '—')))
-            v_link = j.get('Ссылка', '#')
-            v_src = j.get('Источник', 'Источник')
-
-            # ФОРМИРУЕМ "ЧИСТЫЙ" ВИД
-            # 🔴 для HH, 🔵 для SJ, 📱 для TG
-            icon = "🔴" if "HH" in v_src else "🔵" if "SJ" in v_src else "📱"
             
+            # Берем кусочек описания (если это ТГ, берем из сохраненного текста)
+            # Мы добавим это поле в метод поиска ТГ чуть ниже
+            v_desc = j.get('snippet', '') 
+
             pretty_text = (
                 f"{icon} <b>{v_name}</b>\n"
                 f"💰 <b>{v_pay}</b> | 🏢 {v_comp}\n"
-                f"🔗 <a href='{v_link}'>Открыть вакансию</a>"
+                f"📝 {v_desc}...\n"
+                f"🔗 <a href='{j['Ссылка']}'>Открыть вакансию</a>"
             )
 
             await message.answer(pretty_text, disable_web_page_preview=True, parse_mode="HTML")
-            await asyncio.sleep(0.4) # Пауза чуть больше, чтобы не поймать бан за спам
-            
-        except Exception as e:
-            logging.error(f"Ошибка вывода вакансии: {e}")
-            # Если сложный HTML не прошел, шлем самый простой текст
-            try:
-                simple_text = f"Вакансия: {j.get('Вакансия')}\n{j.get('Ссылка')}"
-                await message.answer(simple_text, disable_web_page_preview=True)
-            except:
-                pass
+            await asyncio.sleep(0.3)
+        except: pass
 
-    # 4. Генерация отчета и завершение
-    with suppress(MessageNotModified):
-        await status_msg.edit_text("📊 <b>Формирую Excel-отчет...</b>", parse_mode="HTML")
-        
+    # 4. Финальный блок (Excel + Кнопка)
     try:
         excel_file = generate_excel(all_found)
         if excel_file:
-            kb = types.InlineKeyboardMarkup().add(
-                types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
-            )
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
+            
             await message.answer_document(
                 types.InputFile(excel_file, filename=f"Jobs_{query}.xlsx"),
-                caption=f"✅ Готово!\nНайдено: <b>{len(all_found)}</b>",
+                caption=f"✅ Поиск завершен!\nНайдено: <b>{len(all_found)}</b> вакансий.",
                 reply_markup=kb,
                 parse_mode="HTML"
             )
-    except Exception as e:
-        logging.error(f"Excel error: {e}")
+    except:
+        await message.answer(f"✅ Найдено вакансий: {len(all_found)}")
 
     # Удаляем сообщение о поиске в конце
     await status_msg.delete()
