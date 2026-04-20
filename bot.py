@@ -18,6 +18,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from telethon.errors import FloodWaitError
 from aiogram.utils.exceptions import MessageNotModified
 from contextlib import suppress
+from curl_cffi import requests as crequests
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
@@ -164,7 +165,8 @@ def search_hh(query, limit=100):
     url = f"https://api.hh.ru/vacancies?text={query}&search_field=name&area=1&per_page={limit}&order_by=publication_time"
     results = []
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10).json()
+        response = crequests.get(url, headers=HEADERS, impersonate="chrome120", timeout=15)
+        r = response.json()
         for v in r.get('items', []):
             # СНАЧАЛА СЧИТАЕМ PAY
             sal = v.get('salary')
@@ -279,7 +281,7 @@ def search_geekjob(query, limit=10):
     url = f"https://geekjob.ru/vacancies?q={query.replace(' ', '+')}"
     results = []
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
+        r = crequests.get(url, headers=HEADERS, impersonate="chrome120", timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
         
         # Ищем карточки вакансий
@@ -323,7 +325,7 @@ def search_jobfilter(query, limit=5):
     url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
     results = []
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
+        r = crequests.get(url, headers=HEADERS, impersonate="chrome120", timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
         
         # Находим карточки вакансий
