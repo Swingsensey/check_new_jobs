@@ -3,8 +3,6 @@ import asyncio
 import logging
 import requests
 import sqlite3
-import html
-import re
 import pandas as pd
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types
@@ -15,9 +13,7 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from openpyxl.styles import Font, PatternFill, Alignment
-from telethon.errors import FloodWaitError
-from aiogram.utils.exceptions import MessageNotModified
-from contextlib import suppress
+
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
 API_ID = 23009673
@@ -29,17 +25,7 @@ CHANNELS = [
     'vdhl_good', 'mediajobs_ru', 'work_in_media', 'moviestart_ru', 'distantsiya',
     'theblueprintcareer', 'huggabletalents', 'careerspace', 'morejobs', 'heyanie', 
     'marketing_jobs', 'mirkreatorovjob', 'budujobs', 'normrabota', 'jobpower', 
-    'it_vakansii_jobs', 'workasap', 'forproducer', 'vacanciesrus', 
-    'honeyiwantmoney', 'evacuatejobs', 'workinart', 'young_relocate', 'iRecommendWork_IT',
-    'Inwork', 'cliquejobs', 'fashionfaculty', 'forallmedia', 'vitrinajobs',
-    'dnative_job', 'Young_and_Yandex', 'digital_rabota', 'jobforpr', 'megafonjobs',
-    'cozy_hr', 'rassvet_pro', 'young_june', 'mtsfintechjobs', 'digital_hr',
-    'zdemcv', 'foranalysts', 'hcareers_jobs', 'product_jobs', 'edujobs',
-    'talentswanted', 'forchiefs', 'rabota_marketing_juniors', 'tj_collega', 'remotegeekjob',
-    'forallmarketing', 'hsecareer', 'dddwork', 'ya_jobs_pm', 'forproducts',
-    'practicum_experts', 'zloy_kollega', 'jobforjunior', 'vacantcist', 'avito_career',
-    'workasap', 'mirkreatorovjob', 'careerspace', 'huggabletalents', 'theblueprintcareer',
-    'heyanie', 'marketing_jobs', 'it_vakansii_jobs'
+    'it_vakansii_jobs', 'workasap', 'forproducer', 'vacanciesrus'
 ]
 
 # Создаем клиента для чтения каналов
@@ -86,41 +72,28 @@ def is_new_job(job_id):
     return False
 
 # --- ПАРСЕРЫ ---
-async def search_telegram_history(query, limit_per_channel=10):
-    if not client.is_connected(): await client.start()
+async def search_telegram_history(query, limit_per_channel=5):
     results = []
-    seen_texts = set()
-    
-    for channel in CHANNELS[:25]:
+    query_low = query.lower()
+    for channel in CHANNELS:
         try:
-            async for msg in client.iter_messages(channel, search=query, limit=limit_per_channel):
-                if not msg.text or len(msg.text) < 40: continue
-                
-                # Защита от старья: если вакансии больше месяца — пропускаем (опционально)
-                # if (datetime.now() - msg.date.replace(tzinfo=None)).days > 30: continue
-
-                text_id = msg.text[:80].lower().strip()
-                if text_id in seen_texts: continue
-                seen_texts.add(text_id)
-
-                # Ищем зарплату
-                pay = "Договорная"
-                salary_found = re.search(r'(\d[\d\s\.]*)\s?(руб|р\.|₽|\$|€|usd|eur|к)', msg.text.lower())
-                if salary_found: pay = salary_found.group(0).strip()
-
-                results.append({
-                    'id': f"tg_{channel}_{msg.id}",
-                    'Дата': msg.date.strftime('%Y-%m-%d'),
-                    'Источник': f'TG: {channel}',
-                    'Вакансия': query.capitalize(),
-                    'Компания': channel,
-                    'Оплата': pay,
-                    'Ссылка': f"https://t.me/{channel}/{msg.id}",
-                    'snippet': msg.text[:120].replace('\n', ' ') # Короткое описание для чата
-                })
-        except: continue
+            # Метод iter_messages просматривает последние сообщения в канале
+            async for msg in client.iter_messages(channel, limit=limit_per_channel):
+                if msg.text and query_low in msg.text.lower():
+                    results.append({
+                        'id': f"tg_hist_{channel}_{msg.id}",
+                        'text': f"📱 TG [{channel}]: {msg.text[:400]}...\nhttps://t.me/{channel}/{msg.id}",
+                        'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "Неизвестно",
+                        'Источник': f'TG: {channel}',
+                        'Вакансия': 'Архив канала',
+                        'Компания': channel,
+                        'Оплата': 'В посте',
+                        'Ссылка': f"https://t.me/{channel}/{msg.id}"
+                    })
+        except Exception as e:
+            logging.error(f"Ошибка поиска в архиве {channel}: {e}")
     return results
-    
+
 def search_hh(query, limit=100):
     url = f"https://api.hh.ru/vacancies?text={query}&search_field=name&area=1&per_page={limit}&order_by=publication_time"
     results = []
@@ -130,7 +103,7 @@ def search_hh(query, limit=100):
             # СНАЧАЛА СЧИТАЕМ PAY
             sal = v.get('salary')
             pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
-            
+
             # ПОТОМ ИСПОЛЬЗУЕМ
             results.append({
                 'id': f"hh_{v['id']}",
@@ -156,7 +129,7 @@ def search_superjob(query, limit=50):
             if p_from and p_to: pay = f"{p_from}-{p_to}"
             elif p_from: pay = f"от {p_from}"
             else: pay = "Договорная"
-            
+
             results.append({
                 'id': f"sj_{v['id']}",
                 'text': f"🔵 SJ: {v['profession']}\n💰 {pay} | 📅 {datetime.fromtimestamp(v['date_published']).strftime('%d.%m')}\n{v['link']}",
@@ -166,7 +139,6 @@ def search_superjob(query, limit=50):
     except Exception as e:
         logging.error(f"SJ error: {e}")
     return results
-    
 def search_habr(query, limit=20):
     # Москва = 678, тип вакансий = все
     url = f"https://career.habr.com/vacancies?q={query}&city_id=678&type=all"
@@ -179,22 +151,22 @@ def search_habr(query, limit=20):
             return []
 
         soup = BeautifulSoup(r.text, 'html.parser')
-        
+
         # Основной контейнер вакансий на Хабре
         items = soup.find_all('div', class_='vacancy-card')
-        
+
         for i in items[:limit]:
             # Ищем заголовок и ссылку
             title_link = i.find('a', class_='vacancy-card__title-link')
             company_link = i.find('a', class_='vacancy-card__company-title') # Ссылка на компанию
             salary_div = i.find('div', class_='basic-salary') # Зарплата
-            
+
             if title_link:
                 title = title_link.text.strip()
                 link = "https://career.habr.com" + title_link['href']
                 company = company_link.text.strip() if company_link else "Компания не указана"
                 pay = salary_div.text.strip() if salary_div else "Договорная"
-                
+
                 # Сохраняем в нашем эталонном формате
                 results.append({
                     'id': f"hb_{link.split('/')[-1]}", # Берем ID вакансии из URL
@@ -206,73 +178,39 @@ def search_habr(query, limit=20):
                     'Оплата': pay,
                     'Ссылка': link
                 })
-        
+
         logging.info(f"Habr: Найдено {len(results)} вакансий")
-        
+
     except Exception as e:
         logging.error(f"Критическая ошибка Хабр Карьеры: {e}")
-    
+
     return results
 
-def search_geekjob(query, limit=10):
-    # Поиск по разделу Digital/IT
-    url = f"https://geekjob.ru/vacancies?q={query.replace(' ', '+')}"
+def search_jobfilter(query, limit=5):
+    url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
     results = []
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
-        # Ищем карточки вакансий
-        items = soup.find_all('li', class_='vacancy-card')
+        items = soup.find_all('div', class_='vacancy_item') or soup.find_all('div', class_='vacancy-item')
         for i in items[:limit]:
-            a = i.find('a', class_='vacancy-name')
+            a = i.find('a')
             if a:
-                title = a.text.strip()
-                link = "https://geekjob.ru" + a['href']
-                company = i.find('div', class_='company-name').text.strip() if i.find('div', class_='company-name') else "—"
-                pay = i.find('span', class_='salary').text.strip() if i.find('span', class_='salary') else "Договорная"
-                
+                link = "https://jobfilter.ru" + a['href'] if not a['href'].startswith('http') else a['href']
                 results.append({
-                    'id': f"gj_{link.split('/')[-1]}",
-                    'text': f"👨‍💻 GeekJob: {title}\n💰 {pay} | {company}\n{link}",
-                    'Дата': datetime.now().strftime('%Y-%m-%d'),
-                    'Источник': 'GeekJob', 'Вакансия': title, 'Компания': company, 'Оплата': pay, 'Ссылка': link
+                    'id': f"jf_{a['href'][-10:]}",
+                    'text': f"🌐 JF: {a.text.strip()}\n{link}",
+                    'Дата': datetime.now().strftime('%Y-%m-%d'), # Добавили поле
+                    'Источник': 'JobFilter', # Добавили поле
+                    'Вакансия': a.text.strip(), # Добавили поле
+                    'Компания': '—', # Добавили поле
+                    'Оплата': 'См. на сайте', # Добавили поле
+                    'Ссылка': link
                 })
     except: pass
     return results
 
-def search_jobfilter(query, limit=10):
-    url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}"
-    results = []
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        # Пытаемся найти карточки (у них часто меняются классы)
-        items = soup.select('.vacancy_item, .vacancy-item, [class*="vacancy"]')
-        
-        for i in items[:limit]:
-            a = i.find('a')
-            if not a: continue
-            
-            title = a.text.strip()
-            link = a['href'] if a['href'].startswith('http') else "https://jobfilter.ru" + a['href']
-            
-            # Пытаемся найти компанию и оплату в соседних тегах
-            salary = i.find(text=re.compile(r'\d')) if i.find(text=re.compile(r'\d')) else "—"
-
-            results.append({
-                'id': f"jf_{hash(link)}", # Безопасный ID
-                'text': f"🌐 **JobFilter**: {title}\n{link}",
-                'Дата': datetime.now().strftime('%Y-%m-%d'),
-                'Источник': 'JobFilter',
-                'Вакансия': title,
-                'Компания': '—',
-                'Оплата': 'См. на сайте',
-                'Ссылка': link
-            })
-    except Exception as e:
-        logging.error(f"JobFilter error: {e}")
-    return results
-
+@client.on(events.NewMessage(chats=CHANNELS))
 @client.on(events.NewMessage(chats=CHANNELS))
 async def telethon_handler(event):
     try:
@@ -289,18 +227,18 @@ async def telethon_handler(event):
         # 3. Проверяем подписки
         subs = get_all_subs()
         matched_users = []
-        
+
         for user_id, kw in subs:
             # Сравниваем ключевое слово (тоже без ё) с текстом поста
             if kw.lower().replace('ё', 'е') in text_for_search:
                 matched_users.append(user_id)
-        
+
         if matched_users:
             # 4. Проверка на дубликаты (чтобы не слать одно и то же)
             if is_new_job(f"tg_{event.chat_id}_{event.id}"):
                 # Формируем прямую ссылку на пост
                 post_url = f"https://t.me/{username}/{event.id}" if username else "Ссылка скрыта"
-                
+
                 for uid in set(matched_users):
                     try:
                         # 5. Отправляем сообщение с заголовком и ссылкой в конце
@@ -315,13 +253,13 @@ async def telethon_handler(event):
                     except: pass
     except Exception as e:
         logging.error(f"Ошибка в telethon_handler: {e}")
-        
+
 async def monitor_sites():
     while True:
         try:
             logging.info("Запуск циклической проверки сайтов...")
             subs = get_all_subs() # Получаем список [(user_id, keyword), ...]
-            
+
             if not subs:
                 logging.info("Подписок пока нет. Спим.")
                 await asyncio.sleep(600)
@@ -335,7 +273,7 @@ async def monitor_sites():
                 hb = search_habr(kw, 10) 
 
                 all_current_jobs = hh + sj + hb
-                
+
                 # Нормализуем ключевое слово для проверки (е/ё)
                 kw_clean = kw.lower().replace('ё', 'е')
 
@@ -343,7 +281,7 @@ async def monitor_sites():
                     # 2. Проверяем, подходит ли вакансия под ключевое слово (на всякий случай)
                     # и не присылали ли мы её уже раньше (is_new_job)
                     job_text_clean = job['text'].lower().replace('ё', 'е')
-                    
+
                     if kw_clean in job_text_clean:
                         if is_new_job(job['id']):
                             try:
@@ -358,84 +296,49 @@ async def monitor_sites():
                                 await asyncio.sleep(0.7)
                             except Exception as send_error:
                                 logging.error(f"Ошибка отправки сообщения юзеру {user_id}: {send_error}")
-            
+
             logging.info("Проверка завершена. Следующий запуск через 30 минут.")
-            
+
         except Exception as e:
             logging.error(f"Критическая ошибка в monitor_sites: {e}")
-            
+
         # Ждем 30 минут (1800 секунд) перед следующей проверкой
         await asyncio.sleep(1800)
 
 def generate_excel(data):
     try:
-        if not data:
-            return None
-            
         raw_data = []
         for item in data:
-            # 1. Очищаем данные и убираем технические поля (id, text)
+            # Используем .get(), чтобы бот не падал, если поля нет
             raw_data.append({
-                'Дата': str(item.get('Дата', '—')),
-                'Источник': str(item.get('Источник', '—')),
-                'Вакансия': str(item.get('Вакансия', '—')),
-                'Компания': str(item.get('Компания', '—')),
-                'Оплата': str(item.get('Оплата', '—')),
-                'Ссылка': str(item.get('Ссылка', '—'))
+                'Дата': item.get('Дата', '—'),
+                'Источник': item.get('Источник', '—'),
+                'Вакансия': item.get('Вакансия', '—'),
+                'Компания': item.get('Компания', '—'),
+                'Оплата': item.get('Оплата', '—'),
+                'Ссылка': item.get('Ссылка', '—')
             })
 
         df = pd.DataFrame(raw_data)
-        
-        # 2. Умная сортировка по дате
-        if not df.empty:
-            # Создаем временную колонку для правильного сравнения дат
-            df['TempDate'] = pd.to_datetime(df['Дата'], errors='coerce')
-            df = df.sort_values(by='TempDate', ascending=False)
-            df = df.drop(columns=['TempDate']) 
+        if not df.empty and 'Дата' in df.columns:
+            df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
+            df = df.sort_values(by='Дата', ascending=False)
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Вакансии')
             ws = writer.sheets['Вакансии']
-            
-            # 3. Настройка оформления и ссылок
-            header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
-            header_font = Font(color="FFFFFF", bold=True)
-            link_font = Font(color="0000FF", underline="single") # Синий цвет для ссылок
-            
-            # Находим индекс колонки "Ссылка"
-            link_col_idx = df.columns.get_loc("Ссылка") + 1 if "Ссылка" in df.columns else None
-
-            for col_num, column in enumerate(df.columns):
-                # Оформляем шапку
+            fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
+            font = Font(color="FFFFFF", bold=True)
+            for col_num in range(len(df.columns)):
                 cell = ws.cell(row=1, column=col_num + 1)
-                cell.fill = header_fill
-                cell.font = header_font
-                
-                # Устанавливаем ширину колонок
-                col_letter = chr(65 + col_num)
-                if column == 'Ссылка':
-                    ws.column_dimensions[col_letter].width = 45
-                elif column == 'Вакансия':
-                    ws.column_dimensions[col_letter].width = 40
-                else:
-                    ws.column_dimensions[col_letter].width = 20
-
-            # 4. Делаем ссылки кликабельными
-            if link_col_idx:
-                for row in range(2, len(df) + 2):
-                    cell = ws.cell(row=row, column=link_col_idx)
-                    if cell.value and str(cell.value).startswith('http'):
-                        cell.hyperlink = cell.value
-                        cell.font = link_font
-
-            # Закрепляем первую строку
+                cell.fill = fill; cell.font = font
+                ws.column_dimensions[chr(65 + col_num)].width = 35
             ws.freeze_panes = 'A2'
-            
         output.seek(0)
         return output
     except Exception as e:
-        logging.error(f"Критическая ошибка Excel: {e}")
+        logging.error(f"Excel error: {e}")
         return None
 
 # --- ОБРАБОТЧИКИ ---
@@ -460,6 +363,27 @@ async def start_cmd(message: types.Message):
 
 @dp.message_handler(commands=['mysubs'])
 async def list_subs(message: types.Message):
+    conn = sqlite3.connect('manager.db')
+    data = conn.execute('SELECT keyword FROM subs WHERE user_id = ?', (message.from_user.id,)).fetchall()
+    conn.close()
+    
+    if not data:
+        await message.answer(
+            "У тебя пока нет активных подписок. 🤷‍♂️\n\n"
+            "Чтобы подписаться: напиши профессию (например, `продюсер`) и нажми кнопку «Подписаться» под результатами поиска.",
+            parse_mode="Markdown"
+        )
+    else:
+        # Формируем красивый список с галочками
+        subs_list = "\n".join([f"✅ `{row[0]}`" for row in data])
+        text = (
+            "🔔 **Твои активные подписки:**\n\n"
+            f"{subs_list}\n\n"
+            "--- \n"
+            "🗑 Чтобы удалить одну: напиши `/del слово` (напр. `/del продюсер`)\n"
+            "🛑 Чтобы удалить все сразу: нажми /stop_all"
+        )
+        await message.answer(text, parse_mode="Markdown")
     try:
         # Подключаемся к базе
         conn = sqlite3.connect('manager.db')
@@ -494,18 +418,18 @@ async def list_subs(message: types.Message):
 async def del_sub(message: types.Message):
     # Извлекаем слово, которое идет после команды /del
     keyword = message.get_args().lower().strip()
-    
+
     if not keyword:
         await message.answer(
             "⚠ Нужно указать слово для удаления.\n\nПример: `/del режиссер`", 
             parse_mode="Markdown"
         )
         return
-        
+
     conn = sqlite3.connect('manager.db')
     # Проверяем, была ли такая подписка
     res = conn.execute('SELECT 1 FROM subs WHERE user_id = ? AND keyword = ?', (message.from_user.id, keyword)).fetchone()
-    
+
     if res:
         conn.execute('DELETE FROM subs WHERE user_id = ? AND keyword = ?', (message.from_user.id, keyword))
         conn.commit()
@@ -524,115 +448,106 @@ async def clear_subs(message: types.Message):
 
 @dp.message_handler()
 async def manual_search(message: types.Message):
-    if message.text.startswith('/'): return
-    
+    # Если случайно придет неизвестная команда (напр. /help), 
+    # поиск её проигнорирует
+    if message.text.startswith('/'):
+        return
     query = message.text
-    # Используем HTML-разметку (<b>, <i>, <code>)
-    status_msg = await message.answer(f"🔎 <b>Ищу вакансии по запросу:</b> <code>{query}</code>...", parse_mode="HTML")
-    
-    all_found = []
+    wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
+
+    # 1. Сбор данных
+    tg_hist = []
+    try: tg_hist = await search_telegram_history(query, limit_per_channel=5)
+    except: pass
+
+    hh, sj, hb, jf = [], [], [], []
+    try: hh = search_hh(query, 80)
+    except: pass
+    try: sj = search_superjob(query, 40)
+    except: pass
+    try: hb = search_habr(query, 30)
+    except: pass
+    try: jf = search_jobfilter(query, 20)
+    except: pass
+
+    # ФИЛЬТР ДУБЛИКАТОВ (чтобы одна и та же вакансия не вышла дважды)
+    all_raw = tg_hist + hh + sj + hb + jf
     seen_ids = set()
-
-    # 1. Параллельный сбор с сайтов
-    with suppress(MessageNotModified):
-        await status_msg.edit_text("🌐 Опрашиваю сайты (HH, SuperJob, Habr, GeekJob)...", parse_mode="HTML")
-    
-    loop = asyncio.get_running_loop()
-    try:
-        tasks = [
-            loop.run_in_executor(None, search_hh, query, 50),
-            loop.run_in_executor(None, search_superjob, query, 30),
-            loop.run_in_executor(None, search_habr, query, 20),
-            loop.run_in_executor(None, search_jobfilter, query, 20)
-        ]
-        
-        sites_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for res in sites_results:
-            if isinstance(res, list):
-                for job in res:
-                    if job.get('id') and job['id'] not in seen_ids:
-                        all_found.append(job)
-                        seen_ids.add(job['id'])
-            elif isinstance(res, Exception):
-                logging.error(f"Ошибка парсера: {res}")
-    except Exception as e:
-        logging.error(f"Ошибка параллельного парсинга: {e}")
-
-    # 2. Сбор из Telegram (Архивы)
-    with suppress(MessageNotModified):
-        await status_msg.edit_text(f"📡 Проверяю архивы каналов... (Найдено: <b>{len(all_found)}</b>)", parse_mode="HTML")
-    
-    try:
-        tg_hist = await search_telegram_history(query)
-        if tg_hist:
-            for job in tg_hist:
-                if job['id'] not in seen_ids:
-                    all_found.append(job)
-                    seen_ids.add(job['id'])
-    except Exception as e:
-        logging.error(f"Ошибка TG: {e}")
+    all_found = []
+    for job in all_raw:
+        if job['id'] not in seen_ids:
+            all_found.append(job)
+            seen_ids.add(job['id'])
 
     if not all_found:
-        await status_msg.edit_text(f"❌ По запросу '<b>{query}</b>' ничего не найдено.", parse_mode="HTML")
+        await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
         return
 
-    # 3. Вывод результатов
-    # СОРТИРУЕМ ВСЁ НАЙДЕННОЕ ПО ДАТЕ (Сначала новые)
-    all_found.sort(key=lambda x: x.get('Дата', ''), reverse=True)
-    
-    await status_msg.edit_text("📤 <b>Отправляю самые свежие результаты...</b>", parse_mode="HTML")
-    
-    for j in all_found[:15]:
+    # 2. РАСПРЕДЕЛЕНИЕ (по 4 из каждого источника, но только уникальные)
+    top_mix = []
+    for source in [tg_hist, hh, sj, hb, jf]:
+        added = 0
+        for item in source:
+            if added < 4 and item in all_found:
+                top_mix.append(item)
+                added += 1
+
+    for j in top_mix[:20]:
         try:
-            v_src = j.get('Источник', '')
-            # Возвращаем нормальные логотипы
-            icon = "🔴" if "HH" in v_src else "🔵" if "SJ" in v_src else "🟢" if "Habr" in v_src else "📱"
-            
-            v_name = html.escape(str(j.get('Вакансия', '—')))
-            v_pay = html.escape(str(j.get('Оплата', 'Договорная')))
-            v_comp = html.escape(str(j.get('Компания', '—')))
-            
-            # Берем кусочек описания (если это ТГ, берем из сохраненного текста)
-            # Мы добавим это поле в метод поиска ТГ чуть ниже
-            v_desc = j.get('snippet', '') 
-
-            pretty_text = (
-                f"{icon} <b>{v_name}</b>\n"
-                f"💰 <b>{v_pay}</b> | 🏢 {v_comp}\n"
-                f"📝 {v_desc}...\n"
-                f"🔗 <a href='{j['Ссылка']}'>Открыть вакансию</a>"
-            )
-
-            await message.answer(pretty_text, disable_web_page_preview=True, parse_mode="HTML")
-            await asyncio.sleep(0.3)
+            await message.answer(j['text'], disable_web_page_preview=True)
+            await asyncio.sleep(0.2) 
         except: pass
 
-    # 4. Финальный блок (Excel + Кнопка)
-    try:
-        excel_file = generate_excel(all_found)
-        if excel_file:
-            kb = types.InlineKeyboardMarkup()
-            kb.add(types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}"))
-            
-            await message.answer_document(
-                types.InputFile(excel_file, filename=f"Jobs_{query}.xlsx"),
-                caption=f"✅ Поиск завершен!\nНайдено: <b>{len(all_found)}</b> вакансий.",
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
-    except:
-        await message.answer(f"✅ Найдено вакансий: {len(all_found)}")
+    # 3. Excel-отчет
+    excel_file = generate_excel(all_found)
+    if excel_file:
+        await message.answer_document(
+            types.InputFile(excel_file, filename=f"{query}.xlsx"), 
+            caption=f"📊 Найдено уникальных вакансий: {len(all_found)}\n(Собрано из сайтов и каналов)"
+        )
 
-    # Удаляем сообщение о поиске в конце
-    await status_msg.delete()
-    
+    # 4. Кнопка подписки
+    kb = types.InlineKeyboardMarkup().add(
+        types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
+    )
+    await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
+    await wait.delete()
+
+# --- ОБРАБОТЧИК КНОПКИ ПОДПИСКИ ---
+@dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
+async def sub_handler(cb: types.CallbackQuery):
+    # 1. Извлекаем ключевое слово из даты кнопки
+    kw = cb.data.split('|')[1]
+    user_id = cb.from_user.id
+
+    try:
+        # 2. Записываем в базу данных
+        add_subscription(user_id, kw)
+
+        # 3. Отправляем всплывающее уведомление (alert)
+        await bot.answer_callback_query(
+            cb.id, 
+            text=f"✅ Подписка на '{kw}' оформлена!", 
+            show_alert=True
+        )
+
+        # 4. Отправляем подтверждающее сообщение в чат
+        await bot.send_message(
+            user_id, 
+            f"🔔 **Готово!**\n\nЯ запомнил запрос: `{kw}`.\n"
+            f"Как только в каналах или на сайтах появится новая вакансия с этим словом, я мгновенно пришлю её тебе сюда."
+        )
+
+    except Exception as e:
+        logging.error(f"Subscription error: {e}")
+        await bot.answer_callback_query(cb.id, text="❌ Произошла ошибка при подписке.")
+
 async def handle(request):
     return web.Response(text="Bot is running!")
 
 async def main(): # НИКАКИХ ОТСТУПОВ ПЕРЕД async
     init_db()
-    
+
     # 1. Запуск Веб-сервера
     app = web.Application()
     app.router.add_get('/', handle)
