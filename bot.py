@@ -11,7 +11,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from bs4 import BeautifulSoup
 from aiohttp import web
-from datetime import datetime
+from datetime import datetime, timedelta
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -52,10 +52,11 @@ dp = Dispatcher(bot)
 logging.basicConfig(level=logging.INFO)
 
 HEADERS = {
-    'User-Agent': 'MediaJobSearchBot/1.2 (swingsniperbot@gmail.com)',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Referer': 'https://www.google.com/'
+    'Accept-Language': 'ru-RU,ru;q=0.9',
+    'Referer': 'https://www.google.com/',
+    'Connection': 'keep-alive'
 }
 
 # --- БАЗА ДАННЫХ ---
@@ -536,100 +537,103 @@ async def clear_subs(message: types.Message):
 async def manual_search(message: types.Message):
     if message.text.startswith('/'): return
 
-    query = message.text
-    # Используем HTML для красоты (жирный шрифт и код)
-    status_msg = await message.answer(f"🔎 <b>Ищу вакансии по запросу:</b> <code>{query}</code>...", parse_mode="HTML")
+    query = message.text.strip()
+    # Ограничиваем запрос для кнопки (Telegram limit 64 bytes)
+    short_query = query[:30] 
+    
+    status_msg = await message.answer(f"🔎 <b>Ищу вакансии:</b> <code>{query}</code>...", parse_mode="HTML")
 
     all_found = []
     seen_ids = set()
 
-    # 1. ПАРАЛЛЕЛЬНЫЙ СБОР С САЙТОВ (в 4 раза быстрее)
+    # 1. Сбор с сайтов
     with suppress(MessageNotModified):
-        await status_msg.edit_text("🌐 <b>Опрашиваю сайты (HH, SuperJob, Habr)...</b>", parse_mode="HTML")
+        await status_msg.edit_text("🌐 <b>Опрашиваю сайты...</b>", parse_mode="HTML")
 
     loop = asyncio.get_running_loop()
+    # Добавляем JobFilter обратно, он давал массу результатов
+    tasks = [
+        loop.run_in_executor(None, search_hh, query, 50),
+        loop.run_in_executor(None, search_superjob, query, 30),
+        loop.run_in_executor(None, search_habr, query, 20),
+        loop.run_in_executor(None, search_jobfilter, query, 15) 
+    ]
+    
     try:
-        # Запускаем синхронные парсеры одновременно
-        tasks = [
-            loop.run_in_executor(None, search_hh, query, 50),
-            loop.run_in_executor(None, search_superjob, query, 30),
-            loop.run_in_executor(None, search_habr, query, 20),
-            loop.run_in_executor(None, search_jobfilter, query, 20)
-        ]
-        
-        sites_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for res in sites_results:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
             if isinstance(res, list):
                 for job in res:
                     if job.get('id') and job['id'] not in seen_ids:
                         all_found.append(job)
                         seen_ids.add(job['id'])
     except Exception as e:
-        logging.error(f"Ошибка параллельного парсинга: {e}")
+        logging.error(f"Ошибка сайтов: {e}")
 
-    # 2. СБОР ИЗ TELEGRAM (Архивы через серверный поиск)
+    # 2. Сбор из Telegram
     with suppress(MessageNotModified):
-        await status_msg.edit_text(f"📡 <b>Проверяю 54 канала...</b> (Найдено на сайтах: {len(all_found)})", parse_mode="HTML")
+        # Показываем, сколько уже нашли на сайтах
+        await status_msg.edit_text(f"📡 <b>Проверяю 54 канала...</b> (Сайты: {len(all_found)})", parse_mode="HTML")
 
     try:
-        # Используем "Гениальный" метод с параметром search=query
-        tg_hist = await search_telegram_history(query, limit_per_channel=3)
+        # Увеличим лимит до 5, чтобы не пропускать свежее
+        tg_hist = await search_telegram_history(query, limit_per_channel=5)
         if tg_hist:
             for job in tg_hist:
                 if job['id'] not in seen_ids:
                     all_found.append(job)
                     seen_ids.add(job['id'])
     except Exception as e:
-        logging.error(f"Ошибка поиска в архивах TG: {e}")
+        logging.error(f"Ошибка TG: {e}")
 
     if not all_found:
         await status_msg.edit_text(f"❌ По запросу '<b>{query}</b>' ничего не найдено.", parse_mode="HTML")
         return
 
-    # 3. ВЫВОД РЕЗУЛЬТАТОВ
-    with suppress(MessageNotModified):
-        await status_msg.edit_text("📤 <b>Отправляю самые свежие результаты...</b>", parse_mode="HTML")
-    
-    # Сортируем: сначала новые
-    all_found.sort(key=lambda x: x.get('Дата', ''), reverse=True)
+    # 3. УМНАЯ СОРТИРОВКА (Приводим даты к одному виду перед сорт)
+    def sort_key(x):
+        d = x.get('Дата', '0000-00-00')
+        # Если дата в формате DD.MM, превращаем в 2026-MM-DD для сортировки
+        if '.' in d and len(d) <= 5:
+            day, month = d.split('.')
+            return f"2026-{month}-{day}"
+        return d
 
+    all_found.sort(key=sort_key, reverse=True)
+
+    # 4. Вывод топ-15
     for j in all_found[:15]:
         try:
-            v_name = html.escape(str(j.get('Вакансия', '—')))
-            v_pay = html.escape(str(j.get('Оплата', 'Договорная')))
-            v_comp = html.escape(str(j.get('Компания', '—')))
             v_src = str(j.get('Источник', ''))
-            v_link = j.get('Ссылка', '#')
-
             icon = "🔴" if "HH" in v_src else "🔵" if "SJ" in v_src else "🟢" if "Habr" in v_src else "📱"
-
+            
+            # Собираем сообщение БЕЗ лишнего мусора
             pretty_text = (
-                f"{icon} <b>{v_name}</b>\n"
-                f"💰 <b>{v_pay}</b> | 🏢 {v_comp}\n"
-                f"🔗 <a href='{v_link}'>Открыть вакансию</a>"
+                f"{icon} <b>{html.escape(str(j.get('Вакансия', '—')))}</b>\n"
+                f"💰 <b>{html.escape(str(j.get('Оплата', 'Договорная')))}</b> | 🏢 {html.escape(str(j.get('Компания', '—')))}\n"
+                f"🔗 <a href='{j.get('Ссылка', '#')}'>Открыть вакансию</a>"
             )
-
             await message.answer(pretty_text, disable_web_page_preview=True, parse_mode="HTML")
             await asyncio.sleep(0.3)
-        except Exception as e:
-            logging.error(f"Ошибка вывода: {e}")
+        except: continue
 
-    # 4. ФИНАЛЬНЫЙ БЛОК (Excel + Кнопка)
+    # 5. Генерация Excel и кнопка
     try:
         excel_file = generate_excel(all_found)
         if excel_file:
+            # Важно: используем short_query, чтобы кнопка не сломалась
             kb = types.InlineKeyboardMarkup().add(
-                types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
+                types.InlineKeyboardButton(f"🔔 Подписаться на '{short_query}'", callback_data=f"sub|{short_query}")
             )
             await message.answer_document(
-                types.InputFile(excel_file, filename=f"Jobs_{query}.xlsx"),
-                caption=f"✅ Готово! Найдено уникальных вакансий: <b>{len(all_found)}</b>",
+                types.InputFile(excel_file, filename=f"Jobs_{short_query}.xlsx"),
+                caption=f"✅ Найдено вакансий: <b>{len(all_found)}</b>\n(Сортировка: Самые новые вверху)",
                 reply_markup=kb,
                 parse_mode="HTML"
             )
     except Exception as e:
         logging.error(f"Excel error: {e}")
+        await message.answer(f"📊 Поиск завершен. Найдено вакансий: {len(all_found)}")
 
     await status_msg.delete()
 
