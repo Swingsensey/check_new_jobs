@@ -3,6 +3,8 @@ import asyncio
 import logging
 import requests
 import sqlite3
+import html
+import re
 import pandas as pd
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types
@@ -13,6 +15,9 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from openpyxl.styles import Font, PatternFill, Alignment
+from telethon.errors import FloodWaitError
+from aiogram.utils.exceptions import MessageNotModified
+from contextlib import suppress
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
@@ -47,7 +52,10 @@ dp = Dispatcher(bot)
 logging.basicConfig(level=logging.INFO)
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Referer': 'https://www.google.com/'
 }
 
 # --- БАЗА ДАННЫХ ---
@@ -82,26 +90,59 @@ def is_new_job(job_id):
     return False
 
 # --- ПАРСЕРЫ ---
-async def search_telegram_history(query, limit_per_channel=5):
+async def search_telegram_history(query, limit_per_channel=2):
+    if not client.is_connected(): 
+        await client.start()
+        
     results = []
-    query_low = query.lower()
-    for channel in CHANNELS:
+    seen_texts = set()
+    # Ищем вакансии не старше 14 дней
+    date_limit = datetime.now() - timedelta(days=14)
+    query_low = query.lower().replace('ё', 'е')
+
+    # Проходим по списку (лучше ограничить до 30 для скорости поиска)
+    for channel in CHANNELS[:30]:
         try:
-            # Метод iter_messages просматривает последние сообщения в канале
-            async for msg in client.iter_messages(channel, limit=limit_per_channel):
-                if msg.text and query_low in msg.text.lower():
-                    results.append({
-                        'id': f"tg_hist_{channel}_{msg.id}",
-                        'text': f"📱 TG [{channel}]: {msg.text[:400]}...\nhttps://t.me/{channel}/{msg.id}",
-                        'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "Неизвестно",
-                        'Источник': f'TG: {channel}',
-                        'Вакансия': 'Архив канала',
-                        'Компания': channel,
-                        'Оплата': 'В посте',
-                        'Ссылка': f"https://t.me/{channel}/{msg.id}"
-                    })
+            # search=query ищет на серверах ТГ, limit=2 берет только самые свежие
+            async for msg in client.iter_messages(channel, search=query, limit=limit_per_channel):
+                
+                # 1. Фильтр на мусор (короткие сообщения) и дату
+                if not msg.text or len(msg.text) < 150: continue
+                if msg.date.replace(tzinfo=None) < date_limit: continue
+
+                # 2. Защита от дублей (репосты в разных каналах)
+                text_id = msg.text[:100].lower().replace('ё', 'е').strip()
+                if text_id in seen_texts: continue
+                seen_texts.add(text_id)
+
+                # 3. Поиск зарплаты (улучшенная регулярка)
+                pay = "См. в посте"
+                salary_found = re.search(r'(\d[\d\s\.]*)\s?(руб|р\.|₽|\$|€|usd|eur|к|k)', msg.text.lower())
+                if salary_found:
+                    pay = salary_found.group(0).strip()
+
+                # 4. ТВОЙ ЛЮБИМЫЙ ФОРМАТ ВЫВОДА
+                # Очищаем текст от символов, которые могут сломать Markdown
+                display_text = msg.text[:400].replace('*', '').replace('_', '').strip()
+                
+                results.append({
+                    'id': f"tg_{channel}_{msg.id}",
+                    # Строгий формат: Иконка - Канал - Текст - ЗП (если нашли) - Ссылка
+                    'text': f"📱 TG [{channel}]: {display_text}...\n\n💰 Зарплата: {pay}\nhttps://t.me/{channel}/{msg.id}",
+                    'Дата': msg.date.strftime('%Y-%m-%d'),
+                    'Источник': f'TG: {channel}',
+                    'Вакансия': query.capitalize(),
+                    'Компания': channel,
+                    'Оплата': pay,
+                    'Ссылка': f"https://t.me/{channel}/{msg.id}"
+                })
+            
+            # Микро-пауза для обхода FloodWait
+            await asyncio.sleep(0.3) 
+            
         except Exception as e:
-            logging.error(f"Ошибка поиска в архиве {channel}: {e}")
+            logging.error(f"Ошибка канала {channel}: {e}")
+            continue
     return results
 
 def search_hh(query, limit=100):
@@ -221,7 +262,6 @@ def search_jobfilter(query, limit=5):
     return results
 
 @client.on(events.NewMessage(chats=CHANNELS))
-@client.on(events.NewMessage(chats=CHANNELS))
 async def telethon_handler(event):
     try:
         # 1. Получаем текст и приводим к нижнему регистру + убираем ё
@@ -317,38 +357,73 @@ async def monitor_sites():
 
 def generate_excel(data):
     try:
+        if not data:
+            return None
+            
         raw_data = []
         for item in data:
-            # Используем .get(), чтобы бот не падал, если поля нет
+            # 1. Очищаем данные и убираем технические поля (id, text)
             raw_data.append({
-                'Дата': item.get('Дата', '—'),
-                'Источник': item.get('Источник', '—'),
-                'Вакансия': item.get('Вакансия', '—'),
-                'Компания': item.get('Компания', '—'),
-                'Оплата': item.get('Оплата', '—'),
-                'Ссылка': item.get('Ссылка', '—')
+                'Дата': str(item.get('Дата', '—')),
+                'Источник': str(item.get('Источник', '—')),
+                'Вакансия': str(item.get('Вакансия', '—')),
+                'Компания': str(item.get('Компания', '—')),
+                'Оплата': str(item.get('Оплата', '—')),
+                'Ссылка': str(item.get('Ссылка', '—'))
             })
 
         df = pd.DataFrame(raw_data)
-        if not df.empty and 'Дата' in df.columns:
-            df['Дата'] = pd.to_datetime(df['Дата'], errors='coerce').dt.date
-            df = df.sort_values(by='Дата', ascending=False)
+        
+        # 2. Умная сортировка по дате
+        if not df.empty:
+            # Создаем временную колонку для правильного сравнения дат
+            df['TempDate'] = pd.to_datetime(df['Дата'], errors='coerce')
+            df = df.sort_values(by='TempDate', ascending=False)
+            df = df.drop(columns=['TempDate']) 
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Вакансии')
             ws = writer.sheets['Вакансии']
-            fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
-            font = Font(color="FFFFFF", bold=True)
-            for col_num in range(len(df.columns)):
+            
+            # 3. Настройка оформления и ссылок
+            header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True)
+            link_font = Font(color="0000FF", underline="single") # Синий цвет для ссылок
+            
+            # Находим индекс колонки "Ссылка"
+            link_col_idx = df.columns.get_loc("Ссылка") + 1 if "Ссылка" in df.columns else None
+
+            for col_num, column in enumerate(df.columns):
+                # Оформляем шапку
                 cell = ws.cell(row=1, column=col_num + 1)
-                cell.fill = fill; cell.font = font
-                ws.column_dimensions[chr(65 + col_num)].width = 35
+                cell.fill = header_fill
+                cell.font = header_font
+                
+                # Устанавливаем ширину колонок
+                col_letter = chr(65 + col_num)
+                if column == 'Ссылка':
+                    ws.column_dimensions[col_letter].width = 45
+                elif column == 'Вакансия':
+                    ws.column_dimensions[col_letter].width = 40
+                else:
+                    ws.column_dimensions[col_letter].width = 20
+
+            # 4. Делаем ссылки кликабельными
+            if link_col_idx:
+                for row in range(2, len(df) + 2):
+                    cell = ws.cell(row=row, column=link_col_idx)
+                    if cell.value and str(cell.value).startswith('http'):
+                        cell.hyperlink = cell.value
+                        cell.font = link_font
+
+            # Закрепляем первую строку
             ws.freeze_panes = 'A2'
+            
         output.seek(0)
         return output
     except Exception as e:
-        logging.error(f"Excel error: {e}")
+        logging.error(f"Критическая ошибка Excel: {e}")
         return None
 
 # --- ОБРАБОТЧИКИ ---
