@@ -463,13 +463,14 @@ def generate_excel(data):
             
         raw_data = []
         for item in data:
-            # 1. Очищаем данные и убираем технические поля (id, text)
+            # 1. Добавляем 'Описание' в список собираемых полей
             raw_data.append({
                 'Дата': str(item.get('Дата', '—')),
                 'Источник': str(item.get('Источник', '—')),
                 'Вакансия': str(item.get('Вакансия', '—')),
                 'Компания': str(item.get('Компания', '—')),
                 'Оплата': str(item.get('Оплата', '—')),
+                'Описание': str(item.get('Описание', '—')), # НОВОЕ ПОЛЕ
                 'Ссылка': str(item.get('Ссылка', '—'))
             })
 
@@ -477,7 +478,6 @@ def generate_excel(data):
         
         # 2. Умная сортировка по дате
         if not df.empty:
-            # Создаем временную колонку для правильного сравнения дат
             df['TempDate'] = pd.to_datetime(df['Дата'], errors='coerce')
             df = df.sort_values(by='TempDate', ascending=False)
             df = df.drop(columns=['TempDate']) 
@@ -487,38 +487,45 @@ def generate_excel(data):
             df.to_excel(writer, index=False, sheet_name='Вакансии')
             ws = writer.sheets['Вакансии']
             
-            # 3. Настройка оформления и ссылок
+            # 3. Настройка оформления
             header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
             header_font = Font(color="FFFFFF", bold=True)
-            link_font = Font(color="0000FF", underline="single") # Синий цвет для ссылок
+            link_font = Font(color="0000FF", underline="single")
             
-            # Находим индекс колонки "Ссылка"
+            # Находим индексы нужных колонок
             link_col_idx = df.columns.get_loc("Ссылка") + 1 if "Ссылка" in df.columns else None
+            desc_col_idx = df.columns.get_loc("Описание") + 1 if "Описание" in df.columns else None
 
             for col_num, column in enumerate(df.columns):
-                # Оформляем шапку
                 cell = ws.cell(row=1, column=col_num + 1)
                 cell.fill = header_fill
                 cell.font = header_font
                 
-                # Устанавливаем ширину колонок
                 col_letter = chr(65 + col_num)
+                # Настройка ширины колонок
                 if column == 'Ссылка':
                     ws.column_dimensions[col_letter].width = 45
                 elif column == 'Вакансия':
                     ws.column_dimensions[col_letter].width = 40
+                elif column == 'Описание':
+                    ws.column_dimensions[col_letter].width = 60 # Широкая колонка для сути
                 else:
                     ws.column_dimensions[col_letter].width = 20
 
-            # 4. Делаем ссылки кликабельными
-            if link_col_idx:
-                for row in range(2, len(df) + 2):
-                    cell = ws.cell(row=row, column=link_col_idx)
-                    if cell.value and str(cell.value).startswith('http'):
-                        cell.hyperlink = cell.value
-                        cell.font = link_font
+            # 4. Делаем ссылки кликабельными и настраиваем перенос текста для Описания
+            for row in range(2, len(df) + 2):
+                # Для ссылок
+                if link_col_idx:
+                    cell_link = ws.cell(row=row, column=link_col_idx)
+                    if cell_link.value and str(cell_link.value).startswith('http'):
+                        cell_link.hyperlink = cell_link.value
+                        cell_link.font = link_font
+                
+                # Для описания (включаем перенос текста, чтобы было удобно читать)
+                if desc_col_idx:
+                    cell_desc = ws.cell(row=row, column=desc_col_idx)
+                    cell_desc.alignment = Alignment(wrap_text=True, vertical='top')
 
-            # Закрепляем первую строку
             ws.freeze_panes = 'A2'
             
         output.seek(0)
