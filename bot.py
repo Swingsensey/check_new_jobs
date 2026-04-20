@@ -52,7 +52,7 @@ dp = Dispatcher(bot)
 logging.basicConfig(level=logging.INFO)
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': 'MediaJobSearchBot/1.2 (swingsniperbot@gmail.com)',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
     'Referer': 'https://www.google.com/'
@@ -190,6 +190,7 @@ def search_superjob(query, limit=50):
     except Exception as e:
         logging.error(f"SJ error: {e}")
     return results
+    
 def search_habr(query, limit=20):
     # Москва = 678, тип вакансий = все
     url = f"https://career.habr.com/vacancies?q={query}&city_id=678&type=all"
@@ -533,70 +534,104 @@ async def clear_subs(message: types.Message):
 
 @dp.message_handler()
 async def manual_search(message: types.Message):
-    # Если случайно придет неизвестная команда (напр. /help), 
-    # поиск её проигнорирует
-    if message.text.startswith('/'):
-        return
+    if message.text.startswith('/'): return
+
     query = message.text
-    wait = await message.answer(f"🔎 Ищу вакансии по запросу: {query}...")
+    # Используем HTML для красоты (жирный шрифт и код)
+    status_msg = await message.answer(f"🔎 <b>Ищу вакансии по запросу:</b> <code>{query}</code>...", parse_mode="HTML")
 
-    # 1. Сбор данных
-    tg_hist = []
-    try: tg_hist = await search_telegram_history(query, limit_per_channel=5)
-    except: pass
-
-    hh, sj, hb, jf = [], [], [], []
-    try: hh = search_hh(query, 80)
-    except: pass
-    try: sj = search_superjob(query, 40)
-    except: pass
-    try: hb = search_habr(query, 30)
-    except: pass
-    try: jf = search_jobfilter(query, 20)
-    except: pass
-
-    # ФИЛЬТР ДУБЛИКАТОВ (чтобы одна и та же вакансия не вышла дважды)
-    all_raw = tg_hist + hh + sj + hb + jf
-    seen_ids = set()
     all_found = []
-    for job in all_raw:
-        if job['id'] not in seen_ids:
-            all_found.append(job)
-            seen_ids.add(job['id'])
+    seen_ids = set()
+
+    # 1. ПАРАЛЛЕЛЬНЫЙ СБОР С САЙТОВ (в 4 раза быстрее)
+    with suppress(MessageNotModified):
+        await status_msg.edit_text("🌐 <b>Опрашиваю сайты (HH, SuperJob, Habr)...</b>", parse_mode="HTML")
+
+    loop = asyncio.get_running_loop()
+    try:
+        # Запускаем синхронные парсеры одновременно
+        tasks = [
+            loop.run_in_executor(None, search_hh, query, 50),
+            loop.run_in_executor(None, search_superjob, query, 30),
+            loop.run_in_executor(None, search_habr, query, 20),
+            loop.run_in_executor(None, search_jobfilter, query, 20)
+        ]
+        
+        sites_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for res in sites_results:
+            if isinstance(res, list):
+                for job in res:
+                    if job.get('id') and job['id'] not in seen_ids:
+                        all_found.append(job)
+                        seen_ids.add(job['id'])
+    except Exception as e:
+        logging.error(f"Ошибка параллельного парсинга: {e}")
+
+    # 2. СБОР ИЗ TELEGRAM (Архивы через серверный поиск)
+    with suppress(MessageNotModified):
+        await status_msg.edit_text(f"📡 <b>Проверяю 54 канала...</b> (Найдено на сайтах: {len(all_found)})", parse_mode="HTML")
+
+    try:
+        # Используем "Гениальный" метод с параметром search=query
+        tg_hist = await search_telegram_history(query, limit_per_channel=3)
+        if tg_hist:
+            for job in tg_hist:
+                if job['id'] not in seen_ids:
+                    all_found.append(job)
+                    seen_ids.add(job['id'])
+    except Exception as e:
+        logging.error(f"Ошибка поиска в архивах TG: {e}")
 
     if not all_found:
-        await wait.edit_text(f"По запросу '{query}' ничего не найдено.")
+        await status_msg.edit_text(f"❌ По запросу '<b>{query}</b>' ничего не найдено.", parse_mode="HTML")
         return
 
-    # 2. РАСПРЕДЕЛЕНИЕ (по 4 из каждого источника, но только уникальные)
-    top_mix = []
-    for source in [tg_hist, hh, sj, hb, jf]:
-        added = 0
-        for item in source:
-            if added < 4 and item in all_found:
-                top_mix.append(item)
-                added += 1
+    # 3. ВЫВОД РЕЗУЛЬТАТОВ
+    with suppress(MessageNotModified):
+        await status_msg.edit_text("📤 <b>Отправляю самые свежие результаты...</b>", parse_mode="HTML")
+    
+    # Сортируем: сначала новые
+    all_found.sort(key=lambda x: x.get('Дата', ''), reverse=True)
 
-    for j in top_mix[:20]:
+    for j in all_found[:15]:
         try:
-            await message.answer(j['text'], disable_web_page_preview=True)
-            await asyncio.sleep(0.2) 
-        except: pass
+            v_name = html.escape(str(j.get('Вакансия', '—')))
+            v_pay = html.escape(str(j.get('Оплата', 'Договорная')))
+            v_comp = html.escape(str(j.get('Компания', '—')))
+            v_src = str(j.get('Источник', ''))
+            v_link = j.get('Ссылка', '#')
 
-    # 3. Excel-отчет
-    excel_file = generate_excel(all_found)
-    if excel_file:
-        await message.answer_document(
-            types.InputFile(excel_file, filename=f"{query}.xlsx"), 
-            caption=f"📊 Найдено уникальных вакансий: {len(all_found)}\n(Собрано из сайтов и каналов)"
-        )
+            icon = "🔴" if "HH" in v_src else "🔵" if "SJ" in v_src else "🟢" if "Habr" in v_src else "📱"
 
-    # 4. Кнопка подписки
-    kb = types.InlineKeyboardMarkup().add(
-        types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
-    )
-    await message.answer(f"Включить авто-мониторинг для '{query}'?", reply_markup=kb)
-    await wait.delete()
+            pretty_text = (
+                f"{icon} <b>{v_name}</b>\n"
+                f"💰 <b>{v_pay}</b> | 🏢 {v_comp}\n"
+                f"🔗 <a href='{v_link}'>Открыть вакансию</a>"
+            )
+
+            await message.answer(pretty_text, disable_web_page_preview=True, parse_mode="HTML")
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            logging.error(f"Ошибка вывода: {e}")
+
+    # 4. ФИНАЛЬНЫЙ БЛОК (Excel + Кнопка)
+    try:
+        excel_file = generate_excel(all_found)
+        if excel_file:
+            kb = types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton(f"🔔 Подписаться на '{query}'", callback_data=f"sub|{query}")
+            )
+            await message.answer_document(
+                types.InputFile(excel_file, filename=f"Jobs_{query}.xlsx"),
+                caption=f"✅ Готово! Найдено уникальных вакансий: <b>{len(all_found)}</b>",
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logging.error(f"Excel error: {e}")
+
+    await status_msg.delete()
 
 # --- ОБРАБОТЧИК КНОПКИ ПОДПИСКИ ---
 @dp.callback_query_handler(lambda c: c.data.startswith('sub|'))
