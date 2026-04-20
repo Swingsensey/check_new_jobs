@@ -3,7 +3,8 @@ import asyncio
 import logging
 import requests
 import sqlite3
-import html 
+import html
+import re
 import pandas as pd
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types
@@ -86,41 +87,55 @@ def is_new_job(job_id):
 
 # --- ПАРСЕРЫ ---
 async def search_telegram_history(query, limit_per_channel=10):
-    if not client.is_connected():
+    # Лучше использовать start(), он надежнее connect()
+    if not client.is_connected(): 
         await client.start()
-
+        
     results = []
-    seen_texts = set() # Защита от одинаковых постов
-    safe_search_list = CHANNELS[:25] 
-
-    for channel in safe_search_list:
+    seen_texts = set() 
+    
+    for channel in CHANNELS[:25]: 
         try:
+            # Ищем через серверный поиск Telegram
             async for msg in client.iter_messages(channel, search=query, limit=limit_per_channel):
-                if msg.text and len(msg.text) > 20:
-                    # Умная проверка на дубли по первым 100 символам текста
-                    text_snippet = msg.text[:100].lower().strip()
-                    if text_snippet in seen_texts:
-                        continue
-                    seen_texts.add(text_snippet)
+                if not msg.text or len(msg.text) < 30: # Игнорим слишком короткие посты
+                    continue
+                
+                # Защита от дублей: нормализуем текст (убираем пробелы и ё)
+                text_id = msg.text[:70].lower().replace('ё', 'е').strip()
+                if text_id in seen_texts: 
+                    continue
+                seen_texts.add(text_id)
 
-                    # Пытаемся найти зарплату в тексте (простой поиск цифр с валютой)
-                    import re
-                    salary_match = re.search(r'(\d[\d\s]*[0-9])\s?(\$|руб|€|₽|byn)', msg.text.lower())
-                    salary = salary_match.group(0) if salary_match else "См. в посте"
+                # Улучшенный поиск зарплаты (ищем цифры рядом с валютой)
+                # Ищет форматы: 100 000 руб, 2000$, от 150к и т.д.
+                pay = "Договорная"
+                salary_pattern = r'(\d[\d\s\.]*)\s?(руб|р\.|₽|\$|€|usd|eur|k|к)'
+                salary_found = re.search(salary_pattern, msg.text.lower())
+                if salary_found:
+                    pay = salary_found.group(0).strip()
 
-                    results.append({
-                        'id': f"tg_{channel}_{msg.id}",
-                        'text': f"📱 **TG [{channel}]**: {msg.text[:500]}...\n\n🔗 [Открыть вакансию](https://t.me/{channel}/{msg.id})",
-                        'Дата': msg.date.strftime('%Y-%m-%d'),
-                        'Источник': f'TG: {channel}',
-                        'Вакансия': query.capitalize(),
-                        'Компания': channel,
-                        'Оплата': salary, # Теперь не просто текст, а поиск цифр
-                        'Ссылка': f"https://t.me/{channel}/{msg.id}"
-                    })
-            await asyncio.sleep(0.3)
+                # ФОРМИРУЕМ ТЕКСТ (Важно: экранируем текст, чтобы не ломать разметку)
+                clean_content = msg.text[:150].replace('*', '').replace('_', '').strip()
+                
+                results.append({
+                    'id': f"tg_{channel}_{msg.id}",
+                    # Используем Markdown-безопасный формат
+                    'text': f"📱 <b>TG [{channel}]</b>: {clean_content}...\n💰 <b>{pay}</b>\n\n🔗 https://t.me/{channel}/{msg.id}",
+                    'Дата': msg.date.strftime('%Y-%m-%d') if msg.date else "—",
+                    'Источник': f'TG: {channel}',
+                    'Вакансия': query.capitalize(),
+                    'Компания': channel,
+                    'Оплата': pay,
+                    'Ссылка': f"https://t.me/{channel}/{msg.id}"
+                })
+            
+            await asyncio.sleep(0.3) 
+            
         except Exception as e:
-            logging.error(f"Ошибка TG {channel}: {e}")
+            logging.error(f"Ошибка канала {channel}: {e}")
+            continue
+            
     return results
     
 def search_hh(query, limit=100):
@@ -275,7 +290,6 @@ def search_jobfilter(query, limit=10):
         logging.error(f"JobFilter error: {e}")
     return results
 
-@client.on(events.NewMessage(chats=CHANNELS))
 @client.on(events.NewMessage(chats=CHANNELS))
 async def telethon_handler(event):
     try:
@@ -568,42 +582,47 @@ async def manual_search(message: types.Message):
 
     # 3. Вывод результатов
     with suppress(MessageNotModified):
-        await status_msg.edit_text("📤 Отправляю лучшие результаты...", parse_mode="HTML")
+        await status_msg.edit_text("📤 <b>Отправляю лучшие результаты...</b>", parse_mode="HTML")
     
-    # Берем топ-15
     top_results = all_found[:15] 
 
     for j in top_results:
         try:
-            # 1. Получаем текст
-            content = j.get('text', '')
+            # СОБИРАЕМ КРАСИВОЕ СООБЩЕНИЕ ИЗ ПОЛЕЙ
+            # Экранируем только данные, чтобы не упал HTML
+            v_name = html.escape(str(j.get('Вакансия', 'Вакансия')))
+            v_pay = html.escape(str(j.get('Оплата', 'Договорная')))
+            v_comp = html.escape(str(j.get('Компания', '—')))
+            v_link = j.get('Ссылка', '#')
+            v_src = j.get('Источник', 'Источник')
 
-            # 2. Экранируем его (превращаем < в &lt; и т.д.)
-            # Это гарантирует, что Telegram не выдаст ошибку "Can't parse entities"
-            safe_text = html.escape(content)
-
-            # 3. (Опционально) Если ты хочешь, чтобы ссылки внутри текста 
-            # оставались кликабельными, Telegram обычно сам подсвечивает URL 
-            # даже после html.escape.
+            # ФОРМИРУЕМ "ЧИСТЫЙ" ВИД
+            # 🔴 для HH, 🔵 для SJ, 📱 для TG
+            icon = "🔴" if "HH" in v_src else "🔵" if "SJ" in v_src else "📱"
             
-            await message.answer(safe_text, disable_web_page_preview=True, parse_mode="HTML")
-            await asyncio.sleep(0.3) 
+            pretty_text = (
+                f"{icon} <b>{v_name}</b>\n"
+                f"💰 <b>{v_pay}</b> | 🏢 {v_comp}\n"
+                f"🔗 <a href='{v_link}'>Открыть вакансию</a>"
+            )
+
+            await message.answer(pretty_text, disable_web_page_preview=True, parse_mode="HTML")
+            await asyncio.sleep(0.4) # Пауза чуть больше, чтобы не поймать бан за спам
             
         except Exception as e:
-            logging.error(f"Ошибка отправки HTML: {e}")
-            # Если всё равно ошибка (например, текст > 4096 символов), 
-            # отправляем просто текст, обрезав его на всякий случай
+            logging.error(f"Ошибка вывода вакансии: {e}")
+            # Если сложный HTML не прошел, шлем самый простой текст
             try:
-                await message.answer(j.get('text', '')[:4000], disable_web_page_preview=True)
+                simple_text = f"Вакансия: {j.get('Вакансия')}\n{j.get('Ссылка')}"
+                await message.answer(simple_text, disable_web_page_preview=True)
             except:
                 pass
 
     # 4. Генерация отчета и завершение
     with suppress(MessageNotModified):
-        await status_msg.edit_text("📊 Формирую Excel-отчет...", parse_mode="HTML")
+        await status_msg.edit_text("📊 <b>Формирую Excel-отчет...</b>", parse_mode="HTML")
         
     try:
-        # Убедись, что generate_excel возвращает путь к файлу или BytesIO
         excel_file = generate_excel(all_found)
         if excel_file:
             kb = types.InlineKeyboardMarkup().add(
@@ -611,13 +630,12 @@ async def manual_search(message: types.Message):
             )
             await message.answer_document(
                 types.InputFile(excel_file, filename=f"Jobs_{query}.xlsx"),
-                caption=f"✅ Готово!\nНайдено: <b>{len(all_found)}</b>\nПоказано: <b>{len(top_results)}</b>",
+                caption=f"✅ Готово!\nНайдено: <b>{len(all_found)}</b>",
                 reply_markup=kb,
                 parse_mode="HTML"
             )
     except Exception as e:
         logging.error(f"Excel error: {e}")
-        await message.answer(f"✅ Поиск завершен. Найдено уникальных вакансий: {len(all_found)}")
 
     # Удаляем сообщение о поиске в конце
     await status_msg.delete()
