@@ -148,7 +148,7 @@ async def search_telegram_history(query, limit_per_channel=2):
                     'Вакансия': query.capitalize(),
                     'Компания': channel,
                     'Оплата': pay,
-                    'Ссылка': f"https://t.me/{channel}/{msg.id}"
+                    'Ссылка': f"https://t.me/{channel}/{msg.id}",
                     'Описание': desc
                 })
             
@@ -184,7 +184,7 @@ def search_hh(query, limit=100):
                 'id': f"hh_{v['id']}",
                 'text': f"🔴 HH: {v['name']}\n💰 {pay} | 📅 {v['published_at'][:10]}\n{v['alternate_url']}",
                 'Дата': v['published_at'][:10],
-                'Источник': 'HH', 'Вакансия': v['name'], 'Компания': v['employer']['name'], 'Оплата': pay, 'Ссылка': v['alternate_url']
+                'Источник': 'HH', 'Вакансия': v['name'], 'Компания': v['employer']['name'], 'Оплата': pay, 'Ссылка': v['alternate_url'],
                 'Описание': desc[:200]
             })
     except Exception as e:
@@ -214,7 +214,7 @@ def search_superjob(query, limit=50):
                 'id': f"sj_{v['id']}",
                 'text': f"🔵 SJ: {v['profession']}\n💰 {pay} | 📅 {datetime.fromtimestamp(v['date_published']).strftime('%d.%m')}\n{v['link']}",
                 'Дата': datetime.fromtimestamp(v['date_published']).strftime('%Y-%m-%d'),
-                'Источник': 'SuperJob', 'Вакансия': v['profession'], 'Компания': v['client'].get('title', '—'), 'Оплата': pay, 'Ссылка': v['link']
+                'Источник': 'SuperJob', 'Вакансия': v['profession'], 'Компания': v['client'].get('title', '—'), 'Оплата': pay, 'Ссылка': v['link'],
                 'Описание': desc[:200]
             })
     except Exception as e:
@@ -263,7 +263,7 @@ def search_habr(query, limit=20):
                     'Вакансия': title,
                     'Компания': company,
                     'Оплата': pay,
-                    'Ссылка': link
+                    'Ссылка': link,
                     'Описание': desc
                 })
 
