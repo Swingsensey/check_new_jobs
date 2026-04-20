@@ -116,7 +116,7 @@ async def search_telegram_history(query, limit_per_channel=2):
             async for msg in client.iter_messages(channel, search=query, limit=limit_per_channel):
                 
                 # 1. Фильтр на мусор (короткие сообщения) и дату
-                if not msg.text or len(msg.text) < 150: continue
+                if not msg.text or len(msg.text) < 100: continue
                 if msg.date.replace(tzinfo=None) < date_limit: continue
 
                 # 2. Защита от дублей (репосты в разных каналах)
@@ -458,57 +458,40 @@ async def start_cmd(message: types.Message):
 
 @dp.message_handler(commands=['mysubs'])
 async def list_subs(message: types.Message):
-    conn = sqlite3.connect('manager.db')
-    data = conn.execute('SELECT keyword FROM subs WHERE user_id = ?', (message.from_user.id,)).fetchall()
-    conn.close()
-    
-    if not data:
-        await message.answer(
-            "У тебя пока нет активных подписок. 🤷‍♂️\n\n"
-            "Чтобы подписаться: напиши профессию (например, `продюсер`) и нажми кнопку «Подписаться» под результатами поиска.",
-            parse_mode="Markdown"
-        )
-    else:
-        # Формируем красивый список с галочками
-        subs_list = "\n".join([f"✅ `{row[0]}`" for row in data])
-        text = (
-            "🔔 **Твои активные подписки:**\n\n"
-            f"{subs_list}\n\n"
-            "--- \n"
-            "🗑 Чтобы удалить одну: напиши `/del слово` (напр. `/del продюсер`)\n"
-            "🛑 Чтобы удалить все сразу: нажми /stop_all"
-        )
-        await message.answer(text, parse_mode="Markdown")
     try:
-        # Подключаемся к базе
+        # 1. Подключаемся к базе и получаем данные
         conn = sqlite3.connect('manager.db')
-        # Проверяем наличие таблицы, чтобы не было вылета
+        # Создаем таблицу, если вдруг она пропала (защита от ошибок)
         conn.execute('CREATE TABLE IF NOT EXISTS subs (user_id INTEGER, keyword TEXT, UNIQUE(user_id, keyword))')
         
         data = conn.execute('SELECT keyword FROM subs WHERE user_id = ?', (message.from_user.id,)).fetchall()
         conn.close()
         
+        # 2. Если подписок нет
         if not data:
             await message.answer(
                 "У тебя пока нет активных подписок. 🤷‍♂️\n\n"
-                "Напиши профессию и нажми кнопку «Подписаться» под результатами поиска.",
+                "Чтобы подписаться: напиши профессию (например, `режиссер`) и нажми кнопку под результатами поиска.",
                 parse_mode="Markdown"
             )
-        else:
-            # Используем экранирование, чтобы Markdown не ломался от спецсимволов
-            subs_list = "\n".join([f"✅ `{str(row[0])}`" for row in data])
-            text = (
-                "🔔 **Твои активные подписки:**\n\n"
-                f"{subs_list}\n\n"
-                "---\n"
-                "🗑 Чтобы удалить: `/del слово`"
-            )
-            await message.answer(text, parse_mode="Markdown")
+            return
+
+        # 3. Если подписки есть, формируем список
+        subs_list = "\n".join([f"✅ `{str(row[0])}`" for row in data])
+        text = (
+            "🔔 **Твои активные подписки:**\n\n"
+            f"{subs_list}\n\n"
+            "---\n"
+            "🗑 Чтобы удалить: `/del слово` (напр. `/del режиссер`)\n"
+            "🛑 Остановить всё: /stop_all"
+        )
+        
+        await message.answer(text, parse_mode="Markdown")
             
     except Exception as e:
         logging.error(f"Ошибка в mysubs: {e}")
         await message.answer("⚠ Ошибка при чтении списка подписок. Попробуй позже.")
-
+        
 @dp.message_handler(commands=['del'])
 async def del_sub(message: types.Message):
     # Извлекаем слово, которое идет после команды /del
