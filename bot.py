@@ -162,34 +162,74 @@ async def search_telegram_history(query, limit_per_channel=2):
             continue
     return results
 
-def search_hh(query, limit=100):
-    # Твоя ссылка из Гугла (ID должен быть твой)
-    GOOGLE_PROXY_URL = "https://script.google.com/macros/s/AKfycbz89VYCumV1LC4-52i33YYdoFO5MCfCMwZE_ZR6SagJc73enQuXng8mq37zsougaj1TPA/exec"
-    
+def search_trudvsem(query, limit=40):
+    # Прямой запрос к государственному API (регион 77 - Москва)
+    url = f"https://opendata.trudvsem.ru/api/v1/vacancies/region/77?text={query}&limit={limit}"
     results = []
     try:
-        # Запрашиваем данные у Гугла
-        r = requests.get(f"{GOOGLE_PROXY_URL}?q={query}", timeout=25).json()
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return []
         
-        # Берем список вакансий из ключа 'items'
-        vacancies = r.get('items', [])
+        data = r.json()
+        vacancies = data.get('results', {}).get('vacancies', [])
         
-        for v in vacancies:
+        for item in vacancies:
+            v = item.get('vacancy', {})
+            # Чистим описание от HTML-тегов, которые часто присылает этот API
+            raw_desc = v.get('requirement', 'Описание по ссылке')
+            clean_desc = re.sub(r'<[^>]*>', '', str(raw_desc)) 
+
             results.append({
-                'id': v.get('id'),
-                'Дата': v.get('date', '')[:10],
-                'Источник': 'HH+', # Обозначаем как расширенный поиск
-                'Вакансия': v.get('vacancy', '—'), 
-                'Компания': v.get('company', '—'), 
-                'Оплата': v.get('pay', 'Договорная'), 
-                'Ссылка': v.get('link', '#'),
-                'Описание': v.get('desc', '—')
+                'id': f"trud_{v.get('id')}",
+                'Дата': v.get('creation-date', '')[:10],
+                'Источник': 'Trud', 
+                'Вакансия': v.get('job-name', '—'), 
+                'Компания': v.get('company', {}).get('name', '—'), 
+                'Оплата': v.get('salary', 'Договорная'), 
+                'Ссылка': v.get('vac_url', '#'),
+                'Описание': clean_desc[:250]
             })
-            
-        logging.info(f"ТрудВсем (через Google): Найдено {len(results)} вакансий")
     except Exception as e:
-        logging.error(f"Meta-Search failed: {e}")
-    
+        logging.error(f"Direct TrudVsem error: {e}")
+    return results
+
+def search_hh(query, limit=100):
+    GOOGLE_URL = "ТВОЯ_ССЫЛКА_ИЗ_ГУГЛА"
+    results = []
+    try:
+        r = requests.get(f"{GOOGLE_URL}?q={query}", timeout=30)
+        if r.status_code != 200: return []
+        
+        soup = BeautifulSoup(r.text, 'lxml')
+        # Ищем карточки вакансий (селекторы для HH на 2026 год)
+        items = soup.find_all('div', class_='vacancy-serp-item-body') or soup.find_all('div', {'class': 'serp-item'})
+        
+        for v in items:
+            title_el = v.find('a', {'data-qa': 'serp-item__title'})
+            if not title_el: continue
+            
+            title = title_el.text.strip()
+            link = title_el['href'].split('?')[0]
+            
+            salary_el = v.find('span', {'data-qa': 'vacancy-serp__vacancy-compensation'})
+            pay = salary_el.text.strip() if salary_el else "Договорная"
+            
+            comp_el = v.find('a', {'data-qa': 'vacancy-serp__vacancy-employer'})
+            company = comp_el.text.strip() if comp_el else "—"
+
+            results.append({
+                'id': f"hh_{hash(link)}",
+                'Дата': datetime.now().strftime('%Y-%m-%d'),
+                'Источник': 'HH', 
+                'Вакансия': title, 
+                'Компания': company, 
+                'Оплата': pay, 
+                'Ссылка': link,
+                'Описание': "Краткое описание доступно по ссылке."
+            })
+    except Exception as e:
+        logging.error(f"HH HTML Proxy fail: {e}")
     return results
     
 def search_superjob(query, limit=50):
@@ -635,6 +675,7 @@ async def manual_search(message: types.Message):
         loop.run_in_executor(None, search_hh, query, 50),
         loop.run_in_executor(None, search_superjob, query, 30),
         loop.run_in_executor(None, search_habr, query, 20),
+        loop.run_in_executor(None, search_trudvsem, query, 40), # Прямой метод
         loop.run_in_executor(None, search_jobfilter, query, 15) 
     ]
     
@@ -692,17 +733,24 @@ async def manual_search(message: types.Message):
             # Берем наше новое поле Описание
             v_desc = html.escape(str(j.get('Описание', 'Описание доступно по ссылке.')))
 
-            # Подбираем иконку
-            if "HH" in v_src: icon, label = "🔴", "HH"
-            elif "SJ" in v_src: icon, label = "🔵", "SJ"
-            elif "Habr" in v_src: icon, label = "🟢", "Habr"
-            elif "Geek" in v_src: icon, label = "👨‍💻", "GeekJob"
-            else: icon, label = "📱", "TG"
+            # Подбираем иконку и текстовую метку
+            if "HH" in v_src: 
+                icon, label = "🔴", "HH"
+            elif "SJ" in v_src or "SuperJob" in v_src: 
+                icon, label = "🔵", "SJ"
+            elif "Habr" in v_src: 
+                icon, label = "🟢", "Habr"
+            elif "Trud" in v_src: 
+                icon, label = "🏢", "Trud" # Исправлено: теперь две переменные
+            elif "Geek" in v_src: 
+                icon, label = "👨‍💻", "GeekJob"
+            else: 
+                icon, label = "📱", "TG"
 
             # ФОРМИРУЕМ КРАСИВЫЙ ТЕКСТ (Как в подписке)
             pretty_text = (
                 f"{icon} {label}: <b>{v_name}</b>\n"
-                f"💰 {v_pay} | 📅 {v_date}\n"
+                f"💰 <b>{v_pay}</b> | 📅 {v_date}\n"
                 f"🏢 {v_comp}\n\n"
                 f"📝 <b>Суть:</b> <i>{v_desc}...</i>\n\n"
                 f"{v_link}"
