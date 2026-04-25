@@ -26,6 +26,7 @@ API_ID = 23009673
 API_HASH = '249328ef42a91e5c80102c3d73c76a9c'
 SESSION_STR = os.getenv('TELEGRAM_SESSION')
 SJ_KEY = os.getenv('SUPERJOB_KEY') # Твой новый ключ
+HH_TOKEN = os.getenv('HH_TOKEN')
 # Список каналов БЕЗ собаки @
 CHANNELS = [
     'vdhl_good', 'mediajobs_ru', 'work_in_media', 'distantsiya',
@@ -162,35 +163,63 @@ async def search_telegram_history(query, limit_per_channel=2):
     return results
 
 def search_hh(query, limit=100):
+    # area=1 - Москва. Удалите, если нужен поиск по всей РФ
     url = f"https://api.hh.ru/vacancies?text={query}&search_field=name&area=1&per_page={limit}&order_by=publication_time"
+    
+    # ОФИЦИАЛЬНЫЕ ЗАГОЛОВКИ С ТВОИМ ТОКЕНОМ
+    headers = {
+        'Authorization': f'Bearer {HH_TOKEN}',
+        'User-Agent': 'check_new_jobs (ivan.gorovoj@gmail.com)', # Укажи свою почту
+        'Accept': 'application/json',
+    }
+    
     results = []
     try:
-        response = crequests.get(url, headers=HEADERS, impersonate="chrome120", timeout=15)
-        r = response.json()
-        for v in r.get('items', []):
-            # СНАЧАЛА СЧИТАЕМ PAY
+        # Используем официальный путь. curl_cffi маскирует нас под Chrome
+        response = crequests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+        
+        if response.status_code != 200:
+            logging.error(f"HH API Error {response.status_code}: {response.text[:200]}")
+            return []
+
+        data = response.json()
+        
+        for v in data.get('items', []):
+            # 1. Считаем оплату
             sal = v.get('salary')
-            pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
-            # --- ВСТАВИТЬ ЭТО ---
-            # Извлекаем требования и обязанности из snippet
+            pay = "Договорная"
+            if sal:
+                if sal.get('from') and sal.get('to'):
+                    pay = f"{sal['from']}-{sal['to']} {sal.get('currency', 'RUB')}"
+                elif sal.get('from'):
+                    pay = f"от {sal['from']} {sal.get('currency', 'RUB')}"
+                elif sal.get('to'):
+                    pay = f"до {sal['to']} {sal.get('currency', 'RUB')}"
+            
+            # 2. Извлекаем суть (описание)
             snip = v.get('snippet', {})
             req = snip.get('requirement') or ""
             resp = snip.get('responsibility') or ""
-            
-            # Очищаем текст от специфических тегов HH <highlightans>
+            # Чистим текст от тегов HH
             desc = f"{req} {resp}".replace('<highlightans>', '').replace('</highlightans>', '').strip()
-            # --------------------
+            if not desc:
+                desc = "Описание доступно в полной версии вакансии."
 
-            # ПОТОМ ИСПОЛЬЗУЕМ
+            # 3. Формируем результат
             results.append({
                 'id': f"hh_{v['id']}",
-                'text': f"🔴 HH: {v['name']}\n💰 {pay} | 📅 {v['published_at'][:10]}\n{v['alternate_url']}",
-                'Дата': v['published_at'][:10],
-                'Источник': 'HH', 'Вакансия': v['name'], 'Компания': v['employer']['name'], 'Оплата': pay, 'Ссылка': v['alternate_url'],
-                'Описание': desc[:200]
+                'Дата': v.get('published_at', '')[:10],
+                'Источник': 'HH', 
+                'Вакансия': v['name'], 
+                'Компания': v.get('employer', {}).get('name', '—'), 
+                'Оплата': pay, 
+                'Ссылка': v['alternate_url'],
+                'Описание': desc[:250] # Теперь "суть" будет и здесь!
             })
+            
     except Exception as e:
-        logging.error(f"HH error: {e}")
+        logging.error(f"Критическая ошибка HH API: {e}")
+    
     return results
 
 def search_superjob(query, limit=50):
