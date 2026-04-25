@@ -163,53 +163,34 @@ async def search_telegram_history(query, limit_per_channel=2):
     return results
 
 def search_hh(query, limit=100):
-    # Убираем search_field=name, чтобы искать везде (в описании тоже) - это даст больше результатов
     url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
     
-    # ВАЖНО: Используем строго тот User-Agent, который требует HH для API
-    # Формат: AppName (email)
     headers = {
         'Authorization': f'Bearer {os.getenv("HH_TOKEN")}',
-        'User-Agent': 'check_new_jobs (ivan.gorovoj@gmail.com)', # ПРОВЕРЬ ПОЧТУ
+        'User-Agent': 'check_new_jobs (ivan.gorovoj@gmail.com)', # ТВОЙ ЕМЕЙЛ
         'Accept': 'application/json'
     }
     
     results = []
     try:
-        # Для официального API с токеном лучше использовать обычный requests, 
-        # так как curl_cffi может путать защиту своим отпечатком Chrome.
-        response = requests.get(url, headers=headers, timeout=10)
+        # Мудрость: Используем curl_cffi даже для официального API. 
+        # Она лучше имитирует сетевое поведение.
+        response = crequests.get(url, headers=headers, impersonate="chrome120", timeout=15)
         
-        # ЛОГИРОВАНИЕ (Смотри это в консоли Render!)
         logging.info(f"HH API Request: {query} | Status: {response.status_code}")
         
-        if response.status_code == 403:
-            logging.error("HH заблокировал IP Render (403 Forbidden). Нужен прокси.")
-            return []
-        
         if response.status_code != 200:
-            logging.error(f"HH API Error: {response.text}")
             return []
 
         data = response.json()
-        items = data.get('items', [])
-        logging.info(f"HH Найдено: {len(items)} вакансий")
-
-        for v in items:
-            # Считаем pay
+        for v in data.get('items', []):
             sal = v.get('salary')
-            pay = "Договорная"
-            if sal:
-                cur = sal.get('currency', 'RUB')
-                if sal.get('from') and sal.get('to'): pay = f"{sal['from']}-{sal['to']} {cur}"
-                elif sal.get('from'): pay = f"от {sal['from']} {cur}"
-                elif sal.get('to'): pay = f"до {sal['to']} {cur}"
+            pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
             
-            # Суть (Описание)
+            # Извлекаем суть
             snip = v.get('snippet', {})
             desc = f"{snip.get('requirement') or ''} {snip.get('responsibility') or ''}"
             desc = desc.replace('<highlightans>', '').replace('</highlightans>', '').strip()
-            if not desc: desc = "Описание доступно в полной версии."
 
             results.append({
                 'id': f"hh_{v['id']}",
@@ -219,11 +200,10 @@ def search_hh(query, limit=100):
                 'Компания': v.get('employer', {}).get('name', '—'), 
                 'Оплата': pay, 
                 'Ссылка': v['alternate_url'],
-                'Описание': desc[:250]
+                'Описание': desc[:250] # ОБЯЗАТЕЛЬНО ЗАПЯТАЯ ТУТ!
             })
     except Exception as e:
-        logging.error(f"HH Critical error: {e}")
-    
+        logging.error(f"HH error: {e}")
     return results
     
 def search_superjob(query, limit=50):
@@ -811,8 +791,14 @@ async def main(): # НИКАКИХ ОТСТУПОВ ПЕРЕД async
 
     # 2. Запуск мониторинга каналов
     try:
-        await client.start()
-        logging.info("Telethon запущен!")
+        await client.connect() # Подключаемся
+        if not await client.is_user_authorized():
+            logging.error("Telethon не авторизован!")
+            # Если ты на Render, тут ничего не поделать, нужна новая StringSession
+        
+        # МАГИЯ: Запрашиваем диалоги, чтобы сбросить Timestamp
+        await client.get_dialogs(limit=1)
+        logging.info("Telethon синхронизирован!")
     except Exception as e:
         logging.error(f"Telethon error: {e}")
 
