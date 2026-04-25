@@ -163,49 +163,54 @@ async def search_telegram_history(query, limit_per_channel=2):
     return results
 
 def search_hh(query, limit=100):
-    # area=1 - Москва. Удалите, если нужен поиск по всей РФ
-    url = f"https://api.hh.ru/vacancies?text={query}&search_field=name&area=1&per_page={limit}&order_by=publication_time"
+    # Убираем search_field=name, чтобы искать везде (в описании тоже) - это даст больше результатов
+    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
     
-    # ОФИЦИАЛЬНЫЕ ЗАГОЛОВКИ С ТВОИМ ТОКЕНОМ
+    # ВАЖНО: Используем строго тот User-Agent, который требует HH для API
+    # Формат: AppName (email)
     headers = {
-        'Authorization': f'Bearer {HH_TOKEN}',
-        'User-Agent': 'check_new_jobs (ivan.gorovoj@gmail.com)', # Укажи свою почту
-        'Accept': 'application/json',
+        'Authorization': f'Bearer {os.getenv("HH_TOKEN")}',
+        'User-Agent': 'check_new_jobs (ivan.gorovoj@gmail.com)', # ПРОВЕРЬ ПОЧТУ
+        'Accept': 'application/json'
     }
     
     results = []
     try:
-        # Используем официальный путь. curl_cffi маскирует нас под Chrome
-        response = crequests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+        # Для официального API с токеном лучше использовать обычный requests, 
+        # так как curl_cffi может путать защиту своим отпечатком Chrome.
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        # ЛОГИРОВАНИЕ (Смотри это в консоли Render!)
+        logging.info(f"HH API Request: {query} | Status: {response.status_code}")
+        
+        if response.status_code == 403:
+            logging.error("HH заблокировал IP Render (403 Forbidden). Нужен прокси.")
+            return []
         
         if response.status_code != 200:
-            logging.error(f"HH API Error {response.status_code}: {response.text[:200]}")
+            logging.error(f"HH API Error: {response.text}")
             return []
 
         data = response.json()
-        
-        for v in data.get('items', []):
-            # 1. Считаем оплату
+        items = data.get('items', [])
+        logging.info(f"HH Найдено: {len(items)} вакансий")
+
+        for v in items:
+            # Считаем pay
             sal = v.get('salary')
             pay = "Договорная"
             if sal:
-                if sal.get('from') and sal.get('to'):
-                    pay = f"{sal['from']}-{sal['to']} {sal.get('currency', 'RUB')}"
-                elif sal.get('from'):
-                    pay = f"от {sal['from']} {sal.get('currency', 'RUB')}"
-                elif sal.get('to'):
-                    pay = f"до {sal['to']} {sal.get('currency', 'RUB')}"
+                cur = sal.get('currency', 'RUB')
+                if sal.get('from') and sal.get('to'): pay = f"{sal['from']}-{sal['to']} {cur}"
+                elif sal.get('from'): pay = f"от {sal['from']} {cur}"
+                elif sal.get('to'): pay = f"до {sal['to']} {cur}"
             
-            # 2. Извлекаем суть (описание)
+            # Суть (Описание)
             snip = v.get('snippet', {})
-            req = snip.get('requirement') or ""
-            resp = snip.get('responsibility') or ""
-            # Чистим текст от тегов HH
-            desc = f"{req} {resp}".replace('<highlightans>', '').replace('</highlightans>', '').strip()
-            if not desc:
-                desc = "Описание доступно в полной версии вакансии."
+            desc = f"{snip.get('requirement') or ''} {snip.get('responsibility') or ''}"
+            desc = desc.replace('<highlightans>', '').replace('</highlightans>', '').strip()
+            if not desc: desc = "Описание доступно в полной версии."
 
-            # 3. Формируем результат
             results.append({
                 'id': f"hh_{v['id']}",
                 'Дата': v.get('published_at', '')[:10],
@@ -214,14 +219,13 @@ def search_hh(query, limit=100):
                 'Компания': v.get('employer', {}).get('name', '—'), 
                 'Оплата': pay, 
                 'Ссылка': v['alternate_url'],
-                'Описание': desc[:250] # Теперь "суть" будет и здесь!
+                'Описание': desc[:250]
             })
-            
     except Exception as e:
-        logging.error(f"Критическая ошибка HH API: {e}")
+        logging.error(f"HH Critical error: {e}")
     
     return results
-
+    
 def search_superjob(query, limit=50):
     if not SJ_KEY: return []
     url = f"https://api.superjob.ru/2.0/vacancies/?keyword={query}&town=4&count={limit}"
