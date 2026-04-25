@@ -163,29 +163,30 @@ async def search_telegram_history(query, limit_per_channel=2):
     return results
 
 def search_hh(query, limit=100):
-    # ССЫЛКА ИЗ ГУГЛА
+    # Твоя ссылка из Гугла (ID должен быть твой)
     GOOGLE_PROXY_URL = "https://script.google.com/macros/s/AKfycbz89VYCumV1LC4-52i33YYdoFO5MCfCMwZE_ZR6SagJc73enQuXng8mq37zsougaj1TPA/exec"
     
     results = []
     try:
+        # Запрашиваем данные у Гугла
         r = requests.get(f"{GOOGLE_PROXY_URL}?q={query}", timeout=25).json()
         
-        for v in r.get('items', []):
-            # В "Работе России" зарплата уже в удобном виде
-            pay = str(v.get('salary_str', 'Договорная'))
-            
-            desc = v.get('snippet', {}).get('requirement', 'Описание в вакансии')
-
+        # Берем список вакансий из ключа 'items'
+        vacancies = r.get('items', [])
+        
+        for v in vacancies:
             results.append({
-                'id': f"trud_{v['id']}",
-                'Дата': v.get('published_at', '')[:10],
-                'Источник': 'HH+', # Ставим пометку, что это расширенный поиск
-                'Вакансия': v['name'], 
-                'Компания': v.get('employer', {}).get('name', '—'), 
-                'Оплата': pay, 
-                'Ссылка': v['alternate_url'],
-                'Описание': desc[:250]
+                'id': v.get('id'),
+                'Дата': v.get('date', '')[:10],
+                'Источник': 'HH+', # Обозначаем как расширенный поиск
+                'Вакансия': v.get('vacancy', '—'), 
+                'Компания': v.get('company', '—'), 
+                'Оплата': v.get('pay', 'Договорная'), 
+                'Ссылка': v.get('link', '#'),
+                'Описание': v.get('desc', '—')
             })
+            
+        logging.info(f"ТрудВсем (через Google): Найдено {len(results)} вакансий")
     except Exception as e:
         logging.error(f"Meta-Search failed: {e}")
     
