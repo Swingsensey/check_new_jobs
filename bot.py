@@ -163,47 +163,32 @@ async def search_telegram_history(query, limit_per_channel=2):
     return results
 
 def search_hh(query, limit=100):
-    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}&order_by=publication_time"
-    
-    headers = {
-        'Authorization': f'Bearer {os.getenv("HH_TOKEN")}',
-        'User-Agent': 'check_new_jobs (ivan.gorovoj@gmail.com)', # ТВОЙ ЕМЕЙЛ
-        'Accept': 'application/json'
-    }
+    # ССЫЛКА ИЗ ГУГЛА
+    GOOGLE_PROXY_URL = "https://script.google.com/macros/s/AKfycbz89VYCumV1LC4-52i33YYdoFO5MCfCMwZE_ZR6SagJc73enQuXng8mq37zsougaj1TPA/exec"
     
     results = []
     try:
-        # Мудрость: Используем curl_cffi даже для официального API. 
-        # Она лучше имитирует сетевое поведение.
-        response = crequests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+        r = requests.get(f"{GOOGLE_PROXY_URL}?q={query}", timeout=25).json()
         
-        logging.info(f"HH API Request: {query} | Status: {response.status_code}")
-        
-        if response.status_code != 200:
-            return []
-
-        data = response.json()
-        for v in data.get('items', []):
-            sal = v.get('salary')
-            pay = f"от {sal['from']}" if sal and sal['from'] else "Договорная"
+        for v in r.get('items', []):
+            # В "Работе России" зарплата уже в удобном виде
+            pay = str(v.get('salary_str', 'Договорная'))
             
-            # Извлекаем суть
-            snip = v.get('snippet', {})
-            desc = f"{snip.get('requirement') or ''} {snip.get('responsibility') or ''}"
-            desc = desc.replace('<highlightans>', '').replace('</highlightans>', '').strip()
+            desc = v.get('snippet', {}).get('requirement', 'Описание в вакансии')
 
             results.append({
-                'id': f"hh_{v['id']}",
+                'id': f"trud_{v['id']}",
                 'Дата': v.get('published_at', '')[:10],
-                'Источник': 'HH', 
+                'Источник': 'HH+', # Ставим пометку, что это расширенный поиск
                 'Вакансия': v['name'], 
                 'Компания': v.get('employer', {}).get('name', '—'), 
                 'Оплата': pay, 
                 'Ссылка': v['alternate_url'],
-                'Описание': desc[:250] # ОБЯЗАТЕЛЬНО ЗАПЯТАЯ ТУТ!
+                'Описание': desc[:250]
             })
     except Exception as e:
-        logging.error(f"HH error: {e}")
+        logging.error(f"Meta-Search failed: {e}")
+    
     return results
     
 def search_superjob(query, limit=50):
