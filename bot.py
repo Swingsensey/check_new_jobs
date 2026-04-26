@@ -199,44 +199,37 @@ def search_trudvsem(query, limit=50):
     return results
 
 def search_hh(query, limit=100):
-    # ТВОЯ ССЫЛКА ИЗ ГУГЛА
     GOOGLE_PROXY_URL = "https://script.google.com/macros/s/AKfycbz89VYCumV1LC4-52i33YYdoFO5MCfCMwZE_ZR6SagJc73enQuXng8mq37zsougaj1TPA/exec"
-    
     results = []
     try:
-        # 1. Получаем HTML
         r = requests.get(f"{GOOGLE_PROXY_URL}?q={query}", timeout=30)
         if r.status_code != 200: return []
         
-        soup = BeautifulSoup(r.text, 'lxml')
+        soup = BeautifulSoup(r.text, 'html.parser')
+        # В твоем логе вакансии лежат в div-ах с классом serp-item
+        items = soup.find_all('div', class_='serp-item')
         
-        # 2. Ищем контейнеры вакансий (HH часто меняет их, пробуем все варианты)
-        items = soup.select('[data-qa="vacancy-serp__vacancy"]') or \
-                soup.select('.vacancy-serp-item') or \
-                soup.select('.serp-item')
-
         for v in items:
             try:
-                # Ищем заголовок и ссылку
-                title_el = v.find('a', {'data-qa': 'serp-item__title'}) or v.find('a', href=re.compile(r'/vacancy/'))
+                # Ищем заголовок внутри data-qa
+                title_el = v.find('a', {'data-qa': 'serp-item__title'})
                 if not title_el: continue
                 
                 title = title_el.text.strip()
+                # Получаем чистую ссылку
                 link = title_el['href'].split('?')[0]
+                if not link.startswith('http'): link = 'https://hh.ru' + link
                 
                 # Зарплата
-                salary_el = v.find('span', {'data-qa': 'vacancy-serp__vacancy-compensation'}) or \
-                            v.select_one('[class*="compensation"]')
+                salary_el = v.find('span', {'data-qa': 'vacancy-serp__vacancy-compensation'})
                 pay = salary_el.text.strip() if salary_el else "Договорная"
                 
                 # Компания
-                comp_el = v.find('a', {'data-qa': 'vacancy-serp__vacancy-employer'}) or \
-                          v.select_one('[data-qa="vacancy-serp__vacancy-employer"]')
+                comp_el = v.find('a', {'data-qa': 'vacancy-serp__vacancy-employer'})
                 company = comp_el.text.strip() if comp_el else "—"
 
                 # Суть (Snippet)
-                # На странице поиска HH суть лежит в блоках под заголовком
-                desc_el = v.select_one('[data-qa="vacancy-serp__vacancy_snippet_requirement"]')
+                desc_el = v.find('div', {'data-qa': 'vacancy-serp__vacancy_snippet_requirement'})
                 desc = desc_el.text.strip() if desc_el else "Описание в вакансии"
 
                 results.append({
@@ -247,14 +240,12 @@ def search_hh(query, limit=100):
                     'Компания': company, 
                     'Оплата': pay, 
                     'Ссылка': link,
-                    'Описание': desc[:200]
+                    'Описание': desc[:250]
                 })
             except: continue
-            
-        logging.info(f"HH: Найдено {len(results)} вакансий через Google Proxy")
+        logging.info(f"HH: Найдено {len(results)} вакансий")
     except Exception as e:
-        logging.error(f"HH Parser error: {e}")
-    
+        logging.error(f"HH Error: {e}")
     return results
     
 def search_superjob(query, limit=50):
@@ -735,14 +726,15 @@ async def manual_search(message: types.Message):
         await status_msg.edit_text(f"❌ По запросу '<b>{query}</b>' ничего не найдено.", parse_mode="HTML")
         return
 
-    # 3. УМНАЯ СОРТИРОВКА (Приводим даты к одному виду перед сорт)
+    # 3. УМНАЯ СОРТИРОВКА
     def sort_key(x):
-        d = x.get('Дата', '0000-00-00')
-        # Если дата в формате DD.MM, превращаем в 2026-MM-DD для сортировки
+        d = str(x.get('Дата', '')).lower()
+        # Если дата YYYY-MM-DD (как у Trud и HH), она сортируется идеально сама
+        # Если дата DD.MM, превращаем ее для сравнения
         if '.' in d and len(d) <= 5:
             day, month = d.split('.')
             return f"2026-{month}-{day}"
-        return d
+        return d if d else "0000-00-00"
 
     all_found.sort(key=sort_key, reverse=True)
 
