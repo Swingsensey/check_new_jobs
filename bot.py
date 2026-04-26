@@ -820,8 +820,7 @@ async def main():
         logging.error(f"Telethon error: {e}")
 
     # 3. Запуск Aiogram (бот)
-    # КРИТИЧЕСКИ ВАЖНО: 
-    # Эта строчка удаляет любые "зависшие" вебхуки и старые соединения
+    # Удаляем вебхуки и старые соединения
     await bot.delete_webhook(drop_pending_updates=True)
     
     # Запускаем фоновый мониторинг сайтов
@@ -829,9 +828,11 @@ async def main():
 
     logging.info("Бот запущен и очищен от старых обновлений!")
     
-    # skip_updates=True — чтобы бот не отвечал на старые сообщения, которые 
-    # накопились, пока он был выключен (это часто вызывает ConflictError)
-    await dp.start_polling(skip_updates=True)
+    # --- ИСПРАВЛЕННЫЙ КУСОК ---
+    # Сначала принудительно пропускаем старые сообщения
+    await dp.skip_updates()
+    # Потом запускаем опрос без аргументов внутри
+    await dp.start_polling()
 
 if __name__ == '__main__':
     asyncio.run(main())
