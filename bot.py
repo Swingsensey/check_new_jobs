@@ -198,54 +198,47 @@ def search_trudvsem(query, limit=50):
     
     return results
 
-def search_hh(query, limit=100):
-    GOOGLE_PROXY_URL = "https://script.google.com/macros/s/AKfycbz89VYCumV1LC4-52i33YYdoFO5MCfCMwZE_ZR6SagJc73enQuXng8mq37zsougaj1TPA/exec"
+def search_hh(query, limit=50):
+    # Используем мобильный эндпоинт, он менее защищен
+    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}"
+    
+    # ЭТИ ЗАГОЛОВКИ - КЛЮЧ К УСПЕХУ
+    headers = {
+        "User-Agent": "hh-android-app",
+        "Accept": "application/json",
+        "Host": "api.hh.ru",
+        "Connection": "Keep-Alive"
+    }
+    
     results = []
     try:
-        r = requests.get(f"{GOOGLE_PROXY_URL}?q={query}", timeout=30)
-        if r.status_code != 200: return []
+        # Попробуем сначала обычный requests
+        r = requests.get(url, headers=headers, timeout=10)
         
-        soup = BeautifulSoup(r.text, 'html.parser')
-        # В твоем логе вакансии лежат в div-ах с классом serp-item
-        items = soup.find_all('div', class_='serp-item')
-        
+        if r.status_code != 200:
+            logging.warning(f"HH API Direct Fail ({r.status_code}). Пробуем альтернативу...")
+            return []
+
+        items = r.json().get('items', [])
         for v in items:
-            try:
-                # Ищем заголовок внутри data-qa
-                title_el = v.find('a', {'data-qa': 'serp-item__title'})
-                if not title_el: continue
-                
-                title = title_el.text.strip()
-                # Получаем чистую ссылку
-                link = title_el['href'].split('?')[0]
-                if not link.startswith('http'): link = 'https://hh.ru' + link
-                
-                # Зарплата
-                salary_el = v.find('span', {'data-qa': 'vacancy-serp__vacancy-compensation'})
-                pay = salary_el.text.strip() if salary_el else "Договорная"
-                
-                # Компания
-                comp_el = v.find('a', {'data-qa': 'vacancy-serp__vacancy-employer'})
-                company = comp_el.text.strip() if comp_el else "—"
+            sal = v.get('salary')
+            pay = f"от {sal['from']}" if sal and sal.get('from') else "Договорная"
+            
+            snip = v.get('snippet', {})
+            desc = f"{snip.get('requirement') or ''} {snip.get('responsibility') or ''}"
+            desc = desc.replace('<highlightans>', '').replace('</highlightans>', '').strip()
 
-                # Суть (Snippet)
-                desc_el = v.find('div', {'data-qa': 'vacancy-serp__vacancy_snippet_requirement'})
-                desc = desc_el.text.strip() if desc_el else "Описание в вакансии"
-
-                results.append({
-                    'id': f"hh_{hash(link)}",
-                    'Дата': datetime.now().strftime('%Y-%m-%d'),
-                    'Источник': 'HH', 
-                    'Вакансия': title, 
-                    'Компания': company, 
-                    'Оплата': pay, 
-                    'Ссылка': link,
-                    'Описание': desc[:250]
-                })
-            except: continue
-        logging.info(f"HH: Найдено {len(results)} вакансий")
-    except Exception as e:
-        logging.error(f"HH Error: {e}")
+            results.append({
+                'id': f"hh_{v['id']}",
+                'Дата': v.get('published_at', '')[:10],
+                'Источник': 'HH', 
+                'Вакансия': v['name'], 
+                'Компания': v.get('employer', {}).get('name', '—'), 
+                'Оплата': pay, 
+                'Ссылка': v['alternate_url'],
+                'Описание': desc[:250]
+            })
+    except: pass
     return results
     
 def search_superjob(query, limit=50):
