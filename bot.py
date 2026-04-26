@@ -27,6 +27,7 @@ API_HASH = '249328ef42a91e5c80102c3d73c76a9c'
 SESSION_STR = os.getenv('TELEGRAM_SESSION')
 SJ_KEY = os.getenv('SUPERJOB_KEY') # Твой новый ключ
 HH_TOKEN = os.getenv('HH_TOKEN')
+SCRAPER_KEY = os.getenv('SCRAPER_API_KEY')
 # Список каналов БЕЗ собаки @
 CHANNELS = [
     'vdhl_good', 'mediajobs_ru', 'work_in_media', 'distantsiya',
@@ -199,35 +200,44 @@ def search_trudvsem(query, limit=50):
     return results
 
 def search_hh(query, limit=50):
-    # Используем мобильный эндпоинт, он менее защищен
-    url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}"
+    # 1. Формируем исходный URL (как и раньше)
+    target_url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}"
     
-    # ЭТИ ЗАГОЛОВКИ - КЛЮЧ К УСПЕХУ
-    headers = {
-        "User-Agent": "hh-android-app",
-        "Accept": "application/json",
-        "Host": "api.hh.ru",
-        "Connection": "Keep-Alive"
-    }
+    # 2. Получаем ключ ScraperAPI из переменных окружения
+    scraper_key = os.getenv('SCRAPER_API_KEY')
+    
+    # 3. Собираем ссылку через прокси
+    # ScraperAPI сам подставит нужные заголовки и чистый IP
+    proxy_url = f"http://api.scraperapi.com?api_key={scraper_key}&url={target_url}"
     
     results = []
     try:
-        # Попробуем сначала обычный requests
-        r = requests.get(url, headers=headers, timeout=10)
+        # Увеличиваем таймаут до 30с, так как прокси-сервису нужно время на поиск свободного IP
+        r = requests.get(proxy_url, timeout=30)
         
         if r.status_code != 200:
-            logging.warning(f"HH API Direct Fail ({r.status_code}). Пробуем альтернативу...")
+            logging.error(f"ScraperAPI failed for HH: Status {r.status_code}")
             return []
 
         items = r.json().get('items', [])
         for v in items:
+            # Логика расчета зарплаты
             sal = v.get('salary')
-            pay = f"от {sal['from']}" if sal and sal.get('from') else "Договорная"
+            pay = "Договорная"
+            if sal:
+                if sal.get('from') and sal.get('to'):
+                    pay = f"{sal['from']} - {sal['to']}"
+                elif sal.get('from'):
+                    pay = f"от {sal['from']}"
+                elif sal.get('to'):
+                    pay = f"до {sal['to']}"
             
+            # Обработка сниппета (описания)
             snip = v.get('snippet', {})
             desc = f"{snip.get('requirement') or ''} {snip.get('responsibility') or ''}"
             desc = desc.replace('<highlightans>', '').replace('</highlightans>', '').strip()
 
+            # Сохраняем в твоем эталонном формате
             results.append({
                 'id': f"hh_{v['id']}",
                 'Дата': v.get('published_at', '')[:10],
@@ -236,9 +246,12 @@ def search_hh(query, limit=50):
                 'Компания': v.get('employer', {}).get('name', '—'), 
                 'Оплата': pay, 
                 'Ссылка': v['alternate_url'],
-                'Описание': desc[:250]
+                'Описание': desc[:250],
+                'snippet': desc[:150] # Для краткого вывода в чат
             })
-    except: pass
+    except Exception as e:
+        logging.error(f"Критическая ошибка HH через ScraperAPI: {e}")
+        
     return results
     
 def search_superjob(query, limit=50):
