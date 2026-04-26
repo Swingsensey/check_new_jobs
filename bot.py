@@ -200,58 +200,38 @@ def search_trudvsem(query, limit=50):
     return results
 
 def search_hh(query, limit=50):
-    # 1. Формируем исходный URL (как и раньше)
+    # Пытаемся взять из системы, если нет - подставляем твой ключ напрямую
+    scraper_key = os.getenv('SCRAPER_API_KEY', '2589882df539e22324ece67efd265e7a')
+    
     target_url = f"https://api.hh.ru/vacancies?text={query}&area=1&per_page={limit}"
-    
-    # 2. Получаем ключ ScraperAPI из переменных окружения
-    scraper_key = os.getenv('SCRAPER_API_KEY')
-    
-    # 3. Собираем ссылку через прокси
-    # ScraperAPI сам подставит нужные заголовки и чистый IP
     proxy_url = f"http://api.scraperapi.com?api_key={scraper_key}&url={target_url}"
     
     results = []
     try:
-        # Увеличиваем таймаут до 30с, так как прокси-сервису нужно время на поиск свободного IP
+        # ТАЙМАУТ 30 СЕКУНД - это критично для прокси!
         r = requests.get(proxy_url, timeout=30)
         
-        if r.status_code != 200:
-            logging.error(f"ScraperAPI failed for HH: Status {r.status_code}")
+        if r.status_code == 401:
+            logging.error("ScraperAPI: Ошибка ключа (401). Проверь подписку или лимиты.")
             return []
 
-        items = r.json().get('items', [])
-        for v in items:
-            # Логика расчета зарплаты
-            sal = v.get('salary')
-            pay = "Договорная"
-            if sal:
-                if sal.get('from') and sal.get('to'):
-                    pay = f"{sal['from']} - {sal['to']}"
-                elif sal.get('from'):
-                    pay = f"от {sal['from']}"
-                elif sal.get('to'):
-                    pay = f"до {sal['to']}"
-            
-            # Обработка сниппета (описания)
-            snip = v.get('snippet', {})
-            desc = f"{snip.get('requirement') or ''} {snip.get('responsibility') or ''}"
-            desc = desc.replace('<highlightans>', '').replace('</highlightans>', '').strip()
+        if r.status_code != 200:
+            logging.error(f"ScraperAPI HH Fail: {r.status_code}")
+            return []
 
-            # Сохраняем в твоем эталонном формате
+        data = r.json()
+        for v in data.get('items', []):
+            sal = v.get('salary')
+            pay = f"от {sal['from']}" if sal and sal.get('from') else "Договорная"
             results.append({
                 'id': f"hh_{v['id']}",
                 'Дата': v.get('published_at', '')[:10],
-                'Источник': 'HH', 
-                'Вакансия': v['name'], 
+                'Источник': 'HH', 'Вакансия': v['name'], 
                 'Компания': v.get('employer', {}).get('name', '—'), 
-                'Оплата': pay, 
-                'Ссылка': v['alternate_url'],
-                'Описание': desc[:250],
-                'snippet': desc[:150] # Для краткого вывода в чат
+                'Оплата': pay, 'Ссылка': v['alternate_url']
             })
     except Exception as e:
-        logging.error(f"Критическая ошибка HH через ScraperAPI: {e}")
-        
+        logging.error(f"HH error: {e}")
     return results
     
 def search_superjob(query, limit=50):
@@ -383,46 +363,27 @@ def search_geekjob(query, limit=10):
     return results
 
 def search_jobfilter(query, limit=5):
-    url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
+    scraper_key = os.getenv('SCRAPER_API_KEY', '2589882df539e22324ece67efd265e7a')
+    target_url = f"https://jobfilter.ru/vacancies?q={query.replace(' ', '+')}&city=москва"
+    proxy_url = f"http://api.scraperapi.com?api_key={scraper_key}&url={target_url}"
+    
     results = []
     try:
-        r = crequests.get(url, headers=HEADERS, impersonate="chrome120", timeout=10)
+        r = requests.get(proxy_url, timeout=30) # Увеличили время ожидания
         soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # Находим карточки вакансий
-        items = soup.find_all('div', class_='vacancy_item') or soup.find_all('div', class_='vacancy-item')
-        
+        items = soup.find_all('div', class_='vacancy_item')
         for i in items[:limit]:
             a = i.find('a')
             if a:
-                title = a.text.strip()
-                link = "https://jobfilter.ru" + a['href'] if not a['href'].startswith('http') else a['href']
-                
-                # --- ИЩЕМ ОПИСАНИЕ (СУТЬ) ---
-                desc_div = i.find('div', class_='description') or i.find('div', class_='vacancy_description')
-                desc = desc_div.text.strip() if desc_div else "Краткое описание доступно по ссылке на сайте."
-                
-                # --- ИЩЕМ ЗАРПЛАТУ (если она есть в карточке) ---
-                pay_div = i.find('div', class_='vacancy_salary') or i.find('span', class_='salary')
-                pay = pay_div.text.strip() if pay_div else "См. на сайте"
-                
-                # --- ИЩЕМ КОМПАНИЮ ---
-                comp_div = i.find('div', class_='company') or i.find('span', class_='company')
-                company = comp_div.text.strip() if comp_div else "Компания не указана"
-
+                link = "https://jobfilter.ru" + a['href']
                 results.append({
-                    'id': f"jf_{hash(link)}", # Используем хэш ссылки как уникальный ID
+                    'id': f"jf_{a['href'][-10:]}",
+                    'text': f"🌐 JF: {a.text.strip()}\n{link}",
                     'Дата': datetime.now().strftime('%Y-%m-%d'),
-                    'Источник': 'JobFilter',
-                    'Вакансия': title,
-                    'Компания': company,
-                    'Оплата': pay,
-                    'Ссылка': link,
-                    'Описание': desc[:200] # Добавляем ключ Описание (суть)
+                    'Источник': 'JobFilter', 'Вакансия': a.text.strip(), 
+                    'Компания': '—', 'Оплата': '—', 'Ссылка': link
                 })
-    except Exception as e:
-        logging.error(f"JobFilter error: {e}")
-        
+    except: pass
     return results
 
 @client.on(events.NewMessage(chats=CHANNELS))
@@ -836,7 +797,7 @@ async def sub_handler(cb: types.CallbackQuery):
 async def handle(request):
     return web.Response(text="Bot is running!")
 
-async def main(): # НИКАКИХ ОТСТУПОВ ПЕРЕД async
+async def main():
     init_db()
 
     # 1. Запуск Веб-сервера
@@ -844,25 +805,33 @@ async def main(): # НИКАКИХ ОТСТУПОВ ПЕРЕД async
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
+    port = int(os.environ.get("PORT", 8080))
+    await web.TCPSite(runner, '0.0.0.0', port).start()
 
-    # 2. Запуск мониторинга каналов
+    # 2. Запуск Telethon (каналы)
     try:
-        await client.connect() # Подключаемся
-        if not await client.is_user_authorized():
-            logging.error("Telethon не авторизован!")
-            # Если ты на Render, тут ничего не поделать, нужна новая StringSession
+        if not client.is_connected():
+            await client.start() # Используй start(), он сам проверит авторизацию
         
-        # МАГИЯ: Запрашиваем диалоги, чтобы сбросить Timestamp
+        # Сброс Timestamp для стабильности
         await client.get_dialogs(limit=1)
-        logging.info("Telethon синхронизирован!")
+        logging.info("Telethon готов!")
     except Exception as e:
         logging.error(f"Telethon error: {e}")
 
-    # 3. Бот
-    # Если функции monitor_sites нет, закомментируй строку ниже:
+    # 3. Запуск Aiogram (бот)
+    # КРИТИЧЕСКИ ВАЖНО: 
+    # Эта строчка удаляет любые "зависшие" вебхуки и старые соединения
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем фоновый мониторинг сайтов
     asyncio.create_task(monitor_sites()) 
-    await dp.start_polling()
+
+    logging.info("Бот запущен и очищен от старых обновлений!")
+    
+    # skip_updates=True — чтобы бот не отвечал на старые сообщения, которые 
+    # накопились, пока он был выключен (это часто вызывает ConflictError)
+    await dp.start_polling(skip_updates=True)
 
 if __name__ == '__main__':
     asyncio.run(main())
