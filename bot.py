@@ -50,9 +50,19 @@ CHANNELS = [
     'heyanie', 'marketing_jobs', 'it_vakansii_jobs'
 ]
 EDU_CHANNELS = [
-    'yandex_academy', 'netology_ru', 'skillbox_ru', 
+    # Школы
+    'kurslivorg', 'yandex_academy', 'netology_ru', 'skillbox_ru', 
     'skillfactory_ru', 'hexclet_ru', 'loftblog', 
-    'stepik_courses', 'free_edu_ru', 'it_shpora'
+    'stepik_courses', 'free_edu_ru', 'it_shpora',
+    # Нейросети и ИИ
+    'neuralshit', 'ai_machinelearning_big_data', 'neuro_sh', 
+    'promtolog', 'deepfaker', 'textmachine', 'gpt_ru', 'vokrug_ai',
+    'igorkrestov', 'ai_for_work', 'neuro_art',
+    # Медиа, Дизайн и Видео
+    'designers_ru', 'aftereffects_ru', 'premierepro_ru', 
+    'fotoforge', 'video_shkola', 'motiongraphics_ru',
+    # IT и Разработка
+    'proglib', 'habr_com', 'tproger', 'python2day', 'javaproglib'
 ]
 
 # Создаем клиента для чтения каналов
@@ -396,8 +406,8 @@ def search_jobfilter(query, limit=5):
     return results
 
 def search_stepik(query, limit=5):
-    # 1. Ищем курсы по ключевому слову
-    search_url = f"https://stepik.org/api/search-results?query={query}&type=course&is_popular=true"
+    # Убрали is_popular=true, чтобы он не подсовывал рандомный мусор
+    search_url = f"https://stepik.org/api/search-results?query={query}&type=course"
     results = []
     try:
         r = requests.get(search_url, headers=HEADERS, timeout=10).json()
@@ -406,18 +416,32 @@ def search_stepik(query, limit=5):
         if not search_results:
             return []
 
-        # Получаем ID найденных курсов
         course_ids = [str(item['course']) for item in search_results[:limit]]
-        
-        # 2. Запрашиваем инфу по этим курсам (чтобы отфильтровать платные)
         courses_url = f"https://stepik.org/api/courses?{'&'.join(['pk=' + c for c in course_ids])}"
         courses_data = requests.get(courses_url, headers=HEADERS, timeout=10).json().get('courses', [])
         
+        # Разбиваем запрос юзера на слова для строгой проверки
+        query_words = query.lower().split()
+
         for c in courses_data:
-            # БЕРЕМ ТОЛЬКО БЕСПЛАТНЫЕ
             if not c.get('is_paid'): 
                 title = c.get('title', 'Без названия')
                 summary = c.get('summary', '').replace('\n', ' ')
+                
+                # ЖЕСТКИЙ ФИЛЬТР: Проверяем, есть ли суть запроса в названии или описании
+                text_to_check = (title + " " + summary).lower()
+                
+                # Ищем совпадения (хотя бы одно длинное слово из запроса должно быть в курсе)
+                is_relevant = False
+                for word in query_words:
+                    if len(word) > 2 and word in text_to_check:
+                        is_relevant = True
+                        break
+                
+                # Если слова из запроса вообще не встречаются в курсе - выкидываем его (мусор)
+                if not is_relevant and len(query_words) > 0:
+                    continue
+
                 url = f"https://stepik.org/course/{c['id']}"
                 results.append({
                     'title': title,
@@ -426,6 +450,188 @@ def search_stepik(query, limit=5):
                 })
     except Exception as e:
         logging.error(f"Stepik error: {e}")
+    return results
+
+def translate_to_english(text: str) -> str:
+    """Перевод на английский через MyMemory (бесплатно)."""
+    try:
+        url = "https://api.mymemory.translated.net/get"
+        params = {"q": text, "langpair": "ru|en"}
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            translated = data.get("responseData", {}).get("translatedText", "")
+            if translated and translated.lower() != text.lower():
+                return translated.strip()
+    except Exception as e:
+        logging.warning(f"Translation error: {e}")
+    return text
+
+
+def search_free_courses(query: str, limit_per_source: int = 8):
+    """
+    Единый поиск бесплатных курсов:
+    - Microsoft Learn
+    - Coursera (audit)
+    - MIT OpenCourseWare + YouTube
+    """
+    results = []
+    original_query = query.strip()
+    query_en = translate_to_english(original_query)
+    
+    logging.info(f"Free courses search: '{original_query}' → '{query_en}'")
+
+    # 1. Microsoft Learn
+    try:
+        url = "https://learn.microsoft.com/api/catalog/"
+        params = {"locale": "en-us", "type": "modules,learningPaths"}
+        r = requests.get(url, params=params, timeout=25)
+        
+        if r.status_code == 200:
+            data = r.json()
+            items = data.get("modules", []) + data.get("learningPaths", [])
+            query_low = query_en.lower()
+            
+            count = 0
+            for item in items:
+                if count >= limit_per_source:
+                    break
+                    
+                title = item.get("title", "")
+                summary = item.get("summary") or item.get("description") or ""
+                
+                if query_low not in title.lower() and query_low not in summary.lower():
+                    continue
+                
+                url_path = item.get("url") or item.get("urlPath")
+                if not url_path:
+                    continue
+                    
+                full_url = f"https://learn.microsoft.com{url_path}" if url_path.startswith("/") else url_path
+                
+                results.append({
+                    "id": f"mslearn_{item.get('uid', item.get('id', hash(title)))}",
+                    "Дата": datetime.now().strftime("%Y-%m-%d"),
+                    "Источник": "Microsoft Learn",
+                    "Вакансия": title,
+                    "Компания": "Microsoft",
+                    "Оплата": "Бесплатно",
+                    "Ссылка": full_url,
+                    "Описание": summary[:250] if summary else "Официальный бесплатный материал Microsoft Learn",
+                    "text": (
+                        f"📘 **Microsoft Learn**\n"
+                        f"**{title}**\n\n"
+                        f"{summary[:180]}...\n\n"
+                        f"🔗 {full_url}"
+                    )
+                })
+                count += 1
+    except Exception as e:
+        logging.error(f"Microsoft Learn error: {e}")
+
+    # 2. Coursera (audit)
+    try:
+        url = "https://api.coursera.org/api/courses.v1"
+        params = {
+            "q": "search",
+            "query": query_en,
+            "limit": limit_per_source,
+            "fields": "name,slug,description,partnerIds",
+            "includes": "partnerIds"
+        }
+        
+        r = requests.get(url, params=params, timeout=20)
+        
+        if r.status_code == 200:
+            data = r.json()
+            elements = data.get("elements", [])
+            
+            partners = {
+                p["id"]: p.get("name", "")
+                for p in data.get("linked", {}).get("partners.v1", [])
+            }
+            
+            for course in elements:
+                name = course.get("name", "Без названия")
+                slug = course.get("slug")
+                if not slug:
+                    continue
+                    
+                link = f"https://www.coursera.org/learn/{slug}"
+                desc = (course.get("description") or "")[:220] or "Описание доступно на странице курса"
+                
+                partner_ids = course.get("partnerIds", [])
+                partner_name = partners.get(str(partner_ids[0]), "Coursera") if partner_ids else "Coursera"
+                
+                results.append({
+                    "id": f"coursera_{course.get('id', slug)}",
+                    "Дата": datetime.now().strftime("%Y-%m-%d"),
+                    "Источник": "Coursera (audit)",
+                    "Вакансия": name,
+                    "Компания": partner_name,
+                    "Оплата": "Audit (материалы бесплатно)",
+                    "Ссылка": link,
+                    "Описание": desc,
+                    "text": (
+                        f"🎓 **Coursera (audit)**\n"
+                        f"**{name}**\n"
+                        f"🏢 {partner_name}\n\n"
+                        f"{desc[:160]}...\n\n"
+                        f"🔗 {link}"
+                    )
+                })
+    except Exception as e:
+        logging.error(f"Coursera error: {e}")
+
+    # 3. MIT OpenCourseWare + YouTube
+    try:
+        query_encoded = query_en.replace(" ", "+")
+        
+        # MIT OCW
+        ocw_url = f"https://ocw.mit.edu/search/?q={query_encoded}"
+        results.append({
+            "id": f"ocw_{hash(query_en)}",
+            "Дата": datetime.now().strftime("%Y-%m-%d"),
+            "Источник": "MIT OCW",
+            "Вакансия": f"MIT OpenCourseWare: {original_query}",
+            "Компания": "Massachusetts Institute of Technology",
+            "Оплата": "Полностью бесплатно",
+            "Ссылка": ocw_url,
+            "Описание": "Официальные материалы MIT (лекции, задания, видео).",
+            "text": (
+                f"🏛️ **MIT OpenCourseWare**\n"
+                f"Поиск: «{original_query}»\n\n"
+                f"🔗 {ocw_url}"
+            )
+        })
+        
+        # YouTube
+        yt_variants = [
+            (f"{query_en} full course", "Полный курс"),
+            (f"{query_en} free course official", "Официальные курсы"),
+            (f"{query_en} MIT OpenCourseWare", "MIT на YouTube"),
+        ]
+        
+        for i, (yt_query, label) in enumerate(yt_variants):
+            yt_url = f"https://www.youtube.com/results?search_query={yt_query.replace(' ', '+')}"
+            results.append({
+                "id": f"yt_{hash(query_en)}_{i}",
+                "Дата": datetime.now().strftime("%Y-%m-%d"),
+                "Источник": "YouTube",
+                "Вакансия": f"YouTube: {label}",
+                "Компания": "YouTube",
+                "Оплата": "Бесплатно",
+                "Ссылка": yt_url,
+                "Описание": f"Поиск: {label}",
+                "text": (
+                    f"▶️ **YouTube** — {label}\n"
+                    f"Запрос: «{original_query}»\n\n"
+                    f"🔗 {yt_url}"
+                )
+            })
+    except Exception as e:
+        logging.error(f"OCW/YouTube error: {e}")
+
     return results
 
 @client.on(events.NewMessage(chats=CHANNELS))
@@ -636,42 +842,53 @@ async def btn_course(message: types.Message, state: FSMContext):
 # Срабатывает ТОЛЬКО если включен режим курсов
 @dp.message_handler(state=SearchMode.course)
 async def process_course_search(message: types.Message, state: FSMContext):
-    if message.text.startswith('/'): return
-    query = message.text.strip()
+    if message.text.startswith('/'): 
+        return
     
-    wait = await message.answer(f"📚 Ищу курсы и уроки по теме: `{query}`...", parse_mode="Markdown")
-
+    query = message.text.strip()
+    wait = await message.answer(f"📚 Ищу бесплатные курсы по теме: `{query}`...", parse_mode="Markdown")
+    
+    # 1. Старый Stepik
     stepik_courses = search_stepik(query)
+    
+    # 2. Новый единый поиск (Microsoft Learn + Coursera + OCW + YouTube)
+    free_courses = search_free_courses(query, limit_per_source=6)
+    
+    # Формируем текст ответа
     text = f"🎓 **БЕСПЛАТНЫЕ МАТЕРИАЛЫ: «{query.upper()}»**\n\n"
-
+    
+    # Stepik
     if stepik_courses:
-        text += "🟢 **Stepik (Полноценные курсы):**\n"
+        text += "🟢 **Stepik:**\n"
         for c in stepik_courses[:3]:
             title = c['title'].replace('[', '').replace(']', '').replace('*', '').replace('_', '')
             text += f"• [{title}]({c['url']})\n  _{c['desc']}..._\n\n"
     else:
-        text += "🟢 **Stepik:** Бесплатных курсов не найдено.\n\n"
-
-    yt_query = query.replace(' ', '+')
-    text += (
-        "🔴 **YouTube (Плейлисты и уроки):**\n"
-        f"• [Смотреть бесплатные уроки по «{query}»](https://www.youtube.com/results?search_query=бесплатный+курс+{yt_query})\n\n"
-    )
-
+        text += "🟢 **Stepik:** ничего не найдено\n\n"
+    
+    # Новые источники
+    if free_courses:
+        text += "📘 **Microsoft Learn / Coursera / MIT / YouTube:**\n"
+        for item in free_courses[:10]:
+            # Берём короткий текст
+            short = item.get('text', '').replace('**', '').replace('\n\n', '\n')
+            text += f"{short}\n\n"
+    else:
+        text += "📘 Дополнительные источники: ничего не найдено\n\n"
+    
+    # Telegram-школы (как было)
     await wait.edit_text("📡 Проверяю Telegram-каналы школ...")
     try:
-        # Просто передаем EDU_CHANNELS в функцию, ничего не подменяя!
-        tg_edu = await search_telegram_history(query, limit_per_channel=1, target_channels=EDU_CHANNELS)
-        
+        tg_edu = await search_telegram_history(query, limit_per_channel=3, target_channels=EDU_CHANNELS)
         if tg_edu:
             text += "📱 **Свежее в Telegram-школах:**\n"
             for j in tg_edu[:2]:
                 text += f"• [Анонс в {j['Компания']}]({j['Ссылка']})\n"
         else:
-            text += "📱 **Telegram-школы:** Ничего нового.\n"
+            text += "📱 **Telegram-школы:** ничего нового\n"
     except Exception as e:
         logging.error(f"TG Edu error: {e}")
-
+    
     await wait.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 @dp.message_handler(text="🔔 Мои подписки", state="*")
