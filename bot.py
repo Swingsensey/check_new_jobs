@@ -481,53 +481,7 @@ def search_free_courses(query: str, limit_per_source: int = 8):
     
     logging.info(f"Free courses search: '{original_query}' → '{query_en}'")
 
-    # 1. Microsoft Learn
-    try:
-        url = "https://learn.microsoft.com/api/catalog/"
-        params = {"locale": "en-us", "type": "modules,learningPaths"}
-        r = requests.get(url, params=params, timeout=25)
-        
-        if r.status_code == 200:
-            data = r.json()
-            items = data.get("modules", []) + data.get("learningPaths", [])
-            query_low = query_en.lower()
-            
-            count = 0
-            for item in items:
-                if count >= limit_per_source:
-                    break
-                    
-                title = item.get("title", "")
-                summary = item.get("summary") or item.get("description") or ""
-                
-                if query_low not in title.lower() and query_low not in summary.lower():
-                    continue
-                
-                url_path = item.get("url") or item.get("urlPath")
-                if not url_path:
-                    continue
-                    
-                full_url = f"https://learn.microsoft.com{url_path}" if url_path.startswith("/") else url_path
-                
-                results.append({
-                    "id": f"mslearn_{item.get('uid', item.get('id', hash(title)))}",
-                    "Дата": datetime.now().strftime("%Y-%m-%d"),
-                    "Источник": "Microsoft Learn",
-                    "Вакансия": title,
-                    "Компания": "Microsoft",
-                    "Оплата": "Бесплатно",
-                    "Ссылка": full_url,
-                    "Описание": summary[:250] if summary else "Официальный бесплатный материал Microsoft Learn",
-                    "text": (
-                        f"📘 **Microsoft Learn**\n"
-                        f"**{title}**\n\n"
-                        f"{summary[:180]}...\n\n"
-                        f"🔗 {full_url}"
-                    )
-                })
-                count += 1
-    except Exception as e:
-        logging.error(f"Microsoft Learn error: {e}")
+   
 
     # 2. Coursera (audit)
     try:
@@ -842,54 +796,69 @@ async def btn_course(message: types.Message, state: FSMContext):
 # Срабатывает ТОЛЬКО если включен режим курсов
 @dp.message_handler(state=SearchMode.course)
 async def process_course_search(message: types.Message, state: FSMContext):
-    if message.text.startswith('/'): 
+    if message.text.startswith('/'):
         return
-    
+
     query = message.text.strip()
     wait = await message.answer(f"📚 Ищу бесплатные курсы по теме: `{query}`...", parse_mode="Markdown")
-    
-    # 1. Старый Stepik
-    stepik_courses = search_stepik(query)
-    
-    # 2. Новый единый поиск (Microsoft Learn + Coursera + OCW + YouTube)
-    free_courses = search_free_courses(query, limit_per_source=6)
-    
-    # Формируем текст ответа
-    text = f"🎓 **БЕСПЛАТНЫЕ МАТЕРИАЛЫ: «{query.upper()}»**\n\n"
-    
-    # Stepik
-    if stepik_courses:
-        text += "🟢 **Stepik:**\n"
-        for c in stepik_courses[:3]:
-            title = c['title'].replace('[', '').replace(']', '').replace('*', '').replace('_', '')
-            text += f"• [{title}]({c['url']})\n  _{c['desc']}..._\n\n"
-    else:
-        text += "🟢 **Stepik:** ничего не найдено\n\n"
-    
-    # Новые источники
-    if free_courses:
-        text += "📘 **Microsoft Learn / Coursera / MIT / YouTube:**\n"
-        for item in free_courses[:10]:
-            # Берём короткий текст
-            short = item.get('text', '').replace('**', '').replace('\n\n', '\n')
-            text += f"{short}\n\n"
-    else:
-        text += "📘 Дополнительные источники: ничего не найдено\n\n"
-    
-    # Telegram-школы (как было)
-    await wait.edit_text("📡 Проверяю Telegram-каналы школ...")
+
     try:
-        tg_edu = await search_telegram_history(query, limit_per_channel=3, target_channels=EDU_CHANNELS)
-        if tg_edu:
-            text += "📱 **Свежее в Telegram-школах:**\n"
-            for j in tg_edu[:2]:
-                text += f"• [Анонс в {j['Компания']}]({j['Ссылка']})\n"
+        # 1. Stepik (быстрый)
+        stepik_courses = search_stepik(query)
+
+        # 2. Новый поиск (Microsoft Learn пока отключаем, он тяжёлый)
+        free_courses = search_free_courses(query, limit_per_source=5)
+
+        # Формируем ответ
+        text = f"🎓 **БЕСПЛАТНЫЕ МАТЕРИАЛЫ: «{query.upper()}»**\n\n"
+
+        # Stepik
+        if stepik_courses:
+            text += "🟢 **Stepik:**\n"
+            for c in stepik_courses[:3]:
+                title = c['title'].replace('[', '').replace(']', '').replace('*', '').replace('_', '')
+                text += f"• [{title}]({c['url']})\n  _{c['desc']}..._\n\n"
         else:
-            text += "📱 **Telegram-школы:** ничего нового\n"
+            text += "🟢 **Stepik:** ничего не найдено\n\n"
+
+        # Microsoft / Coursera / OCW / YouTube
+        if free_courses:
+            text += "📘 **Другие источники:**\n\n"
+            for item in free_courses[:8]:
+                # Берём чистый текст без лишней разметки
+                clean = item.get('text', '').replace('**', '')
+                text += f"{clean}\n\n"
+        else:
+            text += "📘 Дополнительные источники пока пусты\n\n"
+
+        # 3. Telegram-школы (в самом конце)
+        await wait.edit_text("📡 Проверяю Telegram-каналы школ...")
+        
+        try:
+            tg_edu = await search_telegram_history(
+                query, 
+                limit_per_channel=2, 
+                target_channels=EDU_CHANNELS
+            )
+            if tg_edu:
+                text += "📱 **Свежее в Telegram-школах:**\n"
+                for j in tg_edu[:2]:
+                    text += f"• [Анонс в {j['Компания']}]({j['Ссылка']})\n"
+            else:
+                text += "📱 **Telegram-школы:** ничего нового\n"
+        except Exception as e:
+            logging.error(f"TG Edu error: {e}")
+            text += "📱 **Telegram-школы:** временно недоступны\n"
+
+        await wait.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+
     except Exception as e:
-        logging.error(f"TG Edu error: {e}")
-    
-    await wait.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+        logging.error(f"Ошибка поиска курсов: {e}")
+        await wait.edit_text(
+            f"❌ Произошла ошибка при поиске курсов.\n"
+            f"Попробуй ещё раз чуть позже.\n\nОшибка: `{str(e)[:100]}`",
+            parse_mode="Markdown"
+        )
 
 @dp.message_handler(text="🔔 Мои подписки", state="*")
 @dp.message_handler(commands=['mysubs'], state="*")
