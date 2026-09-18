@@ -45,6 +45,11 @@ CHANNELS = [
     'workasap', 'mirkreatorovjob', 'careerspace', 'huggabletalents', 'theblueprintcareer',
     'heyanie', 'marketing_jobs', 'it_vakansii_jobs'
 ]
+EDU_CHANNELS = [
+    'yandex_academy', 'netology_ru', 'skillbox_ru', 
+    'skillfactory_ru', 'hexclet_ru', 'loftblog', 
+    'stepik_courses', 'free_edu_ru', 'it_shpora'
+]
 
 # Создаем клиента для чтения каналов
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
@@ -386,6 +391,39 @@ def search_jobfilter(query, limit=5):
     except: pass
     return results
 
+def search_stepik(query, limit=5):
+    # 1. Ищем курсы по ключевому слову
+    search_url = f"https://stepik.org/api/search-results?query={query}&type=course&is_popular=true"
+    results = []
+    try:
+        r = requests.get(search_url, headers=HEADERS, timeout=10).json()
+        search_results = r.get('search-results', [])
+        
+        if not search_results:
+            return []
+
+        # Получаем ID найденных курсов
+        course_ids = [str(item['course']) for item in search_results[:limit]]
+        
+        # 2. Запрашиваем инфу по этим курсам (чтобы отфильтровать платные)
+        courses_url = f"https://stepik.org/api/courses?{'&'.join(['pk=' + c for c in course_ids])}"
+        courses_data = requests.get(courses_url, headers=HEADERS, timeout=10).json().get('courses', [])
+        
+        for c in courses_data:
+            # БЕРЕМ ТОЛЬКО БЕСПЛАТНЫЕ
+            if not c.get('is_paid'): 
+                title = c.get('title', 'Без названия')
+                summary = c.get('summary', '').replace('\n', ' ')
+                url = f"https://stepik.org/course/{c['id']}"
+                results.append({
+                    'title': title,
+                    'desc': summary[:100],
+                    'url': url
+                })
+    except Exception as e:
+        logging.error(f"Stepik error: {e}")
+    return results
+
 @client.on(events.NewMessage(chats=CHANNELS))
 async def telethon_handler(event):
     try:
@@ -564,19 +602,82 @@ def generate_excel(data):
 async def start_cmd(message: types.Message):
     name = message.from_user.first_name
     await message.answer(
-        f"Привет, {name}! 🎬 Я — твой персональный агент по поиску работы в кино и медиа.\n\n"
+        f"Привет, {name}! 🎬 Я — твой персональный агент по поиску работы в кино, медиа и IT.\n\n"
         f"**Что я умею:**\n"
         f"🔍 **Мгновенный поиск:** Напиши название профессии, и я тут же перерою HH.ru, SuperJob, Habr и JobFilter.\n"
-        f"📂 **Excel-отчеты:** На каждый запрос я присылаю файл с 50 свежими вакансиями.\n"
-        f"⚡️ **Live-мониторинг:** Я читаю Telegram-каналы в реальном времени.\n\n"
-        f"**Как запустить авто-поиск:**\n"
+        f"📂 **Excel-отчеты:** На каждый запрос я присылаю файл со всеми найденными вакансиями.\n"
+        f"⚡️ **Live-мониторинг:** Я читаю 54 Telegram-канала в реальном времени.\n"
+        f"🎓 **Поиск курсов:** Напиши `/course тема`, и я найду лучшие **бесплатные** уроки на Stepik и YouTube.\n\n"
+        f"**Как запустить авто-поиск работы:**\n"
         f"1️⃣ Напиши ключевое слово, например: `режиссер` или `продюсер`.\n"
         f"2️⃣ Под результатом поиска нажми кнопку **«🔔 Подписаться»**.\n"
-        f"3️⃣ Всё! Как только в каналах или на сайтах появится вакансия с этим словом — я мгновенно пришлю её тебе в личку.\n\n"
-        f"💡 **Совет:** Подписывайся на короткие слова (например, `режиссер`), чтобы я ловил все склонения: *«ищем режиссера»*, *«нужны режиссеры»*.\n\n"
-        f"Что ищем сегодня?",
+        f"3️⃣ Всё! Как только появится новая вакансия с этим словом — я мгновенно пришлю её в личку.\n\n"
+        f"💡 **Совет:** Подписывайся на короткие слова (`режиссер`, а не `режиссером`), чтобы я ловил все склонения.\n\n"
+        f"Что ищем сегодня? Вакансию (просто напиши слово) или обучение (напиши `/course тема`)?",
         parse_mode="Markdown"
     )
+
+@dp.message_handler(commands=['course'])
+async def course_search(message: types.Message):
+    # Получаем текст после команды (например: /course монтаж)
+    query = message.get_args().strip()
+    
+    if not query:
+        await message.answer(
+            "🎓 **Поиск бесплатных курсов**\n\n"
+            "Напиши команду и тему, которую хочешь изучить.\n"
+            "Пример: `/course монтаж`, `/course python`, `/course дизайн`",
+            parse_mode="Markdown"
+        )
+        return
+
+    wait = await message.answer(f"📚 Ищу лучшие бесплатные материалы по теме: `{query}`...", parse_mode="Markdown")
+
+    # 1. Поиск по Stepik
+    stepik_courses = search_stepik(query)
+    
+    # 2. Формируем ответ
+    text = f"🎓 **БЕСПЛАТНЫЕ МАТЕРИАЛЫ ПО ЗАПРОСУ «{query.upper()}»**\n\n"
+
+    if stepik_courses:
+        text += "🟢 **Stepik (Полноценные курсы):**\n"
+        for c in stepik_courses[:3]:
+            # Экранируем символы для Markdown
+            title = c['title'].replace('[', '').replace(']', '').replace('*', '')
+            text += f"• [{title}]({c['url']})\n  _{c['desc']}..._\n\n"
+    else:
+        text += "🟢 **Stepik:** Бесплатных курсов не найдено.\n\n"
+
+    # 3. Умная ссылка на YouTube
+    yt_query = query.replace(' ', '+')
+    text += (
+        "🔴 **YouTube (Плейлисты и уроки):**\n"
+        f"• [Смотреть бесплатные уроки по {query}](https://www.youtube.com/results?search_query=бесплатный+курс+{yt_query})\n\n"
+    )
+
+    # 4. Поиск по Telegram-каналам школ (используем твой гениальный поиск)
+    await wait.edit_text("📡 Проверяю Telegram-каналы школ...")
+    
+    try:
+        # Временно подменяем глобальный CHANNELS на образовательные для поиска
+        global CHANNELS
+        original_channels = CHANNELS
+        CHANNELS = EDU_CHANNELS
+        
+        tg_edu = await search_telegram_history(query, limit_per_channel=1)
+        
+        # Возвращаем всё как было
+        CHANNELS = original_channels
+        
+        if tg_edu:
+            text += "📱 **Свежее в Telegram-школах:**\n"
+            for j in tg_edu[:2]:
+                text += f"• [Пост в {j['Компания']}]({j['Ссылка']})\n"
+    except Exception as e:
+        logging.error(f"TG Edu error: {e}")
+
+    # Отправляем финальный результат
+    await wait.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 @dp.message_handler(commands=['mysubs'])
 async def list_subs(message: types.Message):
