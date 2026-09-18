@@ -19,6 +19,10 @@ from telethon.errors import FloodWaitError
 from aiogram.utils.exceptions import MessageNotModified
 from contextlib import suppress
 from curl_cffi import requests as crequests
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 # --- НАСТРОЙКИ ---
 TOKEN = os.getenv('BOT_TOKEN')
@@ -56,7 +60,20 @@ client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 
 bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+# Включаем оперативную память для бота
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
+
+# Создаем состояния (режимы)
+class SearchMode(StatesGroup):
+    course = State() # Включен режим курсов (если состояния нет — ищем работу)
+
+# Создаем постоянное меню с кнопками
+def get_main_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    kb.add(KeyboardButton("💼 Искать работу"), KeyboardButton("🎓 Искать курсы"))
+    kb.add(KeyboardButton("🔔 Мои подписки"))
+    return kb
 logging.basicConfig(level=logging.INFO)
 
 HEADERS = {
@@ -107,49 +124,38 @@ def is_new_job(job_id):
     return False
 
 # --- ПАРСЕРЫ ---
-async def search_telegram_history(query, limit_per_channel=2):
+async def search_telegram_history(query, limit_per_channel=2, target_channels=None):
     if not client.is_connected(): 
         await client.start()
         
     results = []
     seen_texts = set()
-    # Ищем вакансии не старше 14 дней
     date_limit = datetime.now() - timedelta(days=14)
     query_low = query.lower().replace('ё', 'е')
 
-    # Проходим по списку (лучше ограничить до 30 для скорости поиска)
-    for channel in CHANNELS[:30]:
+    # Если мы не передали спец. каналы, берем дефолтные 30 из главного списка
+    channels_to_search = target_channels if target_channels else CHANNELS[:30]
+
+    for channel in channels_to_search:
         try:
-            # search=query ищет на серверах ТГ, limit=2 берет только самые свежие
             async for msg in client.iter_messages(channel, search=query, limit=limit_per_channel):
-                
-                # 1. Фильтр на мусор (короткие сообщения) и дату
                 if not msg.text or len(msg.text) < 100: continue
                 if msg.date.replace(tzinfo=None) < date_limit: continue
 
-                # 2. Защита от дублей (репосты в разных каналах)
                 text_id = msg.text[:100].lower().replace('ё', 'е').strip()
                 if text_id in seen_texts: continue
                 seen_texts.add(text_id)
 
-                # 3. Поиск зарплаты (улучшенная регулярка)
                 pay = "См. в посте"
                 salary_found = re.search(r'(\d[\d\s\.]*)\s?(руб|р\.|₽|\$|€|usd|eur|к|k)', msg.text.lower())
                 if salary_found:
                     pay = salary_found.group(0).strip()
-                    # --- ВСТАВИТЬ ЭТО ---
-                # Извлекаем начало поста как суть вакансии
-                # Убираем переносы строк, чтобы текст был плотным
-                desc = msg.text[:200].replace('\n', ' ').replace('*', '').replace('_', '').strip()
-                # --------------------
 
-                # 4. ТВОЙ ЛЮБИМЫЙ ФОРМАТ ВЫВОДА
-                # Очищаем текст от символов, которые могут сломать Markdown
+                desc = msg.text[:200].replace('\n', ' ').replace('*', '').replace('_', '').strip()
                 display_text = msg.text[:400].replace('*', '').replace('_', '').strip()
                 
                 results.append({
                     'id': f"tg_{channel}_{msg.id}",
-                    # Строгий формат: Иконка - Канал - Текст - ЗП (если нашли) - Ссылка
                     'text': f"📱 TG [{channel}]: {display_text}...\n\n💰 Зарплата: {pay}\nhttps://t.me/{channel}/{msg.id}",
                     'Дата': msg.date.strftime('%Y-%m-%d'),
                     'Источник': f'TG: {channel}',
@@ -160,9 +166,7 @@ async def search_telegram_history(query, limit_per_channel=2):
                     'Описание': desc
                 })
             
-            # Микро-пауза для обхода FloodWait
             await asyncio.sleep(0.3) 
-            
         except Exception as e:
             logging.error(f"Ошибка канала {channel}: {e}")
             continue
@@ -598,8 +602,9 @@ def generate_excel(data):
 
 # --- ОБРАБОТЧИКИ ---
 
-@dp.message_handler(commands=['start'])
-async def start_cmd(message: types.Message):
+@dp.message_handler(commands=['start'], state="*")
+async def start_cmd(message: types.Message, state: FSMContext):
+    await state.finish() # Сбрасываем режим на "Работу" по умолчанию
     name = message.from_user.first_name
     await message.answer(
         f"Привет, {name}! 🎬 Я — твой персональный агент по поиску работы в кино, медиа и IT.\n\n"
@@ -607,80 +612,71 @@ async def start_cmd(message: types.Message):
         f"🔍 **Мгновенный поиск:** Напиши название профессии, и я тут же перерою HH.ru, SuperJob, Habr и JobFilter.\n"
         f"📂 **Excel-отчеты:** На каждый запрос я присылаю файл со всеми найденными вакансиями.\n"
         f"⚡️ **Live-мониторинг:** Я читаю 54 Telegram-канала в реальном времени.\n"
-        f"🎓 **Поиск курсов:** Напиши `/course тема`, и я найду лучшие **бесплатные** уроки на Stepik и YouTube.\n\n"
+        f"🎓 **Поиск курсов:** Нажми кнопку **«🎓 Искать курсы»** и напиши тему, а я найду лучшие **бесплатные** уроки на Stepik и YouTube.\n\n"
         f"**Как запустить авто-поиск работы:**\n"
-        f"1️⃣ Напиши ключевое слово, например: `режиссер` или `продюсер`.\n"
+        f"1️⃣ Нажми **«💼 Искать работу»** и напиши ключевое слово, например: `режиссер` или `продюсер`.\n"
         f"2️⃣ Под результатом поиска нажми кнопку **«🔔 Подписаться»**.\n"
         f"3️⃣ Всё! Как только появится новая вакансия с этим словом — я мгновенно пришлю её в личку.\n\n"
         f"💡 **Совет:** Подписывайся на короткие слова (`режиссер`, а не `режиссером`), чтобы я ловил все склонения.\n\n"
-        f"Что ищем сегодня? Вакансию (просто напиши слово) или обучение (напиши `/course тема`)?",
-        parse_mode="Markdown"
+        f"Выбери нужный режим с помощью кнопок внизу 👇",
+        parse_mode="Markdown",
+        reply_markup=get_main_kb()
     )
 
-@dp.message_handler(commands=['course'])
-async def course_search(message: types.Message):
-    # Получаем текст после команды (например: /course монтаж)
-    query = message.get_args().strip()
+@dp.message_handler(text="💼 Искать работу", state="*")
+async def btn_job(message: types.Message, state: FSMContext):
+    await state.finish() # Выключаем режим курсов
+    await message.answer("💼 **РЕЖИМ: ПОИСК РАБОТЫ**\n\nПросто напиши профессию (например: `режиссер` или `монтажер`), и я соберу вакансии со всех сайтов и 54 каналов.", parse_mode="Markdown")
+
+@dp.message_handler(text="🎓 Искать курсы", state="*")
+async def btn_course(message: types.Message, state: FSMContext):
+    await SearchMode.course.set() # Включаем режим курсов
+    await message.answer("🎓 **РЕЖИМ: ПОИСК КУРСОВ**\n\nНапиши тему, которую хочешь изучить (например: `python`, `дизайн`, `ии генерация видео`).", parse_mode="Markdown")
+
+# Срабатывает ТОЛЬКО если включен режим курсов
+@dp.message_handler(state=SearchMode.course)
+async def process_course_search(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'): return
+    query = message.text.strip()
     
-    if not query:
-        await message.answer(
-            "🎓 **Поиск бесплатных курсов**\n\n"
-            "Напиши команду и тему, которую хочешь изучить.\n"
-            "Пример: `/course монтаж`, `/course python`, `/course дизайн`",
-            parse_mode="Markdown"
-        )
-        return
+    wait = await message.answer(f"📚 Ищу курсы и уроки по теме: `{query}`...", parse_mode="Markdown")
 
-    wait = await message.answer(f"📚 Ищу лучшие бесплатные материалы по теме: `{query}`...", parse_mode="Markdown")
-
-    # 1. Поиск по Stepik
     stepik_courses = search_stepik(query)
-    
-    # 2. Формируем ответ
-    text = f"🎓 **БЕСПЛАТНЫЕ МАТЕРИАЛЫ ПО ЗАПРОСУ «{query.upper()}»**\n\n"
+    text = f"🎓 **БЕСПЛАТНЫЕ МАТЕРИАЛЫ: «{query.upper()}»**\n\n"
 
     if stepik_courses:
         text += "🟢 **Stepik (Полноценные курсы):**\n"
         for c in stepik_courses[:3]:
-            # Экранируем символы для Markdown
-            title = c['title'].replace('[', '').replace(']', '').replace('*', '')
+            title = c['title'].replace('[', '').replace(']', '').replace('*', '').replace('_', '')
             text += f"• [{title}]({c['url']})\n  _{c['desc']}..._\n\n"
     else:
         text += "🟢 **Stepik:** Бесплатных курсов не найдено.\n\n"
 
-    # 3. Умная ссылка на YouTube
     yt_query = query.replace(' ', '+')
     text += (
         "🔴 **YouTube (Плейлисты и уроки):**\n"
-        f"• [Смотреть бесплатные уроки по {query}](https://www.youtube.com/results?search_query=бесплатный+курс+{yt_query})\n\n"
+        f"• [Смотреть бесплатные уроки по «{query}»](https://www.youtube.com/results?search_query=бесплатный+курс+{yt_query})\n\n"
     )
 
-    # 4. Поиск по Telegram-каналам школ (используем твой гениальный поиск)
     await wait.edit_text("📡 Проверяю Telegram-каналы школ...")
-    
     try:
-        # Временно подменяем глобальный CHANNELS на образовательные для поиска
-        global CHANNELS
-        original_channels = CHANNELS
-        CHANNELS = EDU_CHANNELS
-        
-        tg_edu = await search_telegram_history(query, limit_per_channel=1)
-        
-        # Возвращаем всё как было
-        CHANNELS = original_channels
+        # Просто передаем EDU_CHANNELS в функцию, ничего не подменяя!
+        tg_edu = await search_telegram_history(query, limit_per_channel=1, target_channels=EDU_CHANNELS)
         
         if tg_edu:
             text += "📱 **Свежее в Telegram-школах:**\n"
             for j in tg_edu[:2]:
-                text += f"• [Пост в {j['Компания']}]({j['Ссылка']})\n"
+                text += f"• [Анонс в {j['Компания']}]({j['Ссылка']})\n"
+        else:
+            text += "📱 **Telegram-школы:** Ничего нового.\n"
     except Exception as e:
         logging.error(f"TG Edu error: {e}")
 
-    # Отправляем финальный результат
     await wait.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
-@dp.message_handler(commands=['mysubs'])
-async def list_subs(message: types.Message):
+@dp.message_handler(text="🔔 Мои подписки", state="*")
+@dp.message_handler(commands=['mysubs'], state="*")
+async def list_subs(message: types.Message, state: FSMContext):
     conn = None
     try:
         # Устанавливаем таймаут, чтобы подождать, если база занята
@@ -704,7 +700,7 @@ async def list_subs(message: types.Message):
         if conn:
             conn.close()
         
-@dp.message_handler(commands=['del'])
+@dp.message_handler(commands=['del'], state="*")
 async def del_sub(message: types.Message):
     # Извлекаем слово, которое идет после команды /del
     keyword = message.get_args().lower().strip()
@@ -728,7 +724,7 @@ async def del_sub(message: types.Message):
         await message.answer(f"🤔 У тебя нет активной подписки на слово '{keyword}'. Проверь список командой /mysubs")
     conn.close()
 
-@dp.message_handler(commands=['stop_all'])
+@dp.message_handler(commands=['stop_all'], state="*")
 async def clear_subs(message: types.Message):
     conn = sqlite3.connect('manager.db')
     conn.execute('DELETE FROM subs WHERE user_id = ?', (message.from_user.id,))
@@ -736,7 +732,7 @@ async def clear_subs(message: types.Message):
     conn.close()
     await message.answer("📴 Мониторинг остановлен. Все твои подписки были успешно удалены.")
 
-@dp.message_handler()
+@dp.message_handler(state=None)
 async def manual_search(message: types.Message):
     if message.text.startswith('/'): return
 
