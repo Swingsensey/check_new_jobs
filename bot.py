@@ -809,29 +809,30 @@ async def process_course_search(message: types.Message, state: FSMContext):
         # 2. Новый поиск (Microsoft Learn пока отключаем, он тяжёлый)
         free_courses = search_free_courses(query, limit_per_source=5)
 
-        # Формируем ответ
-        text = f"🎓 **БЕСПЛАТНЫЕ МАТЕРИАЛЫ: «{query.upper()}»**\n\n"
+                # Формируем ответ
+        text = f"🎓 БЕСПЛАТНЫЕ МАТЕРИАЛЫ: «{query.upper()}»\n\n"
 
         # Stepik
         if stepik_courses:
-            text += "🟢 **Stepik:**\n"
+            text += "🟢 Stepik:\n"
             for c in stepik_courses[:3]:
                 title = c['title'].replace('[', '').replace(']', '').replace('*', '').replace('_', '')
-                text += f"• [{title}]({c['url']})\n  _{c['desc']}..._\n\n"
+                text += f"• {title}\n  {c['url']}\n  {c['desc']}...\n\n"
         else:
-            text += "🟢 **Stepik:** ничего не найдено\n\n"
+            text += "🟢 Stepik: ничего не найдено\n\n"
 
-        # Microsoft / Coursera / OCW / YouTube
+        # Остальные источники
         if free_courses:
-            text += "📘 **Другие источники:**\n\n"
+            text += "📘 Другие источники:\n\n"
             for item in free_courses[:8]:
-                # Берём чистый текст без лишней разметки
-                clean = item.get('text', '').replace('**', '')
+                clean = item.get('text', '')
+                # Убираем markdown-символы
+                clean = clean.replace('**', '').replace('*', '').replace('_', '').replace('`', '')
                 text += f"{clean}\n\n"
         else:
             text += "📘 Дополнительные источники пока пусты\n\n"
 
-        # 3. Telegram-школы (в самом конце)
+        # Telegram
         await wait.edit_text("📡 Проверяю Telegram-каналы школ...")
         
         try:
@@ -841,16 +842,17 @@ async def process_course_search(message: types.Message, state: FSMContext):
                 target_channels=EDU_CHANNELS
             )
             if tg_edu:
-                text += "📱 **Свежее в Telegram-школах:**\n"
+                text += "📱 Свежее в Telegram-школах:\n"
                 for j in tg_edu[:2]:
-                    text += f"• [Анонс в {j['Компания']}]({j['Ссылка']})\n"
+                    text += f"• {j['Компания']}: {j['Ссылка']}\n"
             else:
-                text += "📱 **Telegram-школы:** ничего нового\n"
+                text += "📱 Telegram-школы: ничего нового\n"
         except Exception as e:
             logging.error(f"TG Edu error: {e}")
-            text += "📱 **Telegram-школы:** временно недоступны\n"
+            text += "📱 Telegram-школы: временно недоступны\n"
 
-        await wait.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+        # Отправляем БЕЗ parse_mode — так не будет ошибок
+        await wait.edit_text(text, parse_mode=None, disable_web_page_preview=True)
 
     except Exception as e:
         logging.error(f"Ошибка поиска курсов: {e}")
