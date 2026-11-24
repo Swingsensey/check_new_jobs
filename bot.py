@@ -840,7 +840,7 @@ def check_yt_language(texts, target_lang):
     else:
         return cyrillic <= 2 and (latin / total_letters) >= 0.75
 
-def search_youtube_channels(query):
+def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None):
     api_key = (os.getenv('YOUTUBE_API_KEY') or '').strip()
     if not api_key:
         return {"error": "NO_KEY"}
@@ -849,18 +849,20 @@ def search_youtube_channels(query):
     MIN_SUBS = 20000
     MAX_SUBS = 3000000
     MIN_AVG_VIEWS = 15000
-    MIN_AVG_DURATION_MIN = 7.0
+    MIN_AVG_DURATION_MIN = 5.0
     MAX_DAYS_SINCE_LAST = 60
 
+    exclude_set = exclude_cids or set()
+    genre_name = genre_label or query
     is_russian = bool(re.search(r'[а-яА-ЯёЁ]', query))
     target_lang = 'ru' if is_russian else 'en'
     published_after = (datetime.utcnow() - timedelta(days=180)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
     try:
-        # 1. Ищем свежие видео по теме (2 страницы = до 100 видео)
+        # 1. Ищем свежие видео по теме
         channel_ids = []
         next_page = None
-        for _ in range(2):
+        for _ in range(pages):
             params = {
                 'part': 'snippet',
                 'q': query,
@@ -886,7 +888,7 @@ def search_youtube_channels(query):
             data = r.json()
             for item in data.get('items', []):
                 cid = item.get('snippet', {}).get('channelId')
-                if cid and cid not in channel_ids:
+                if cid and cid not in channel_ids and cid not in exclude_set:
                     channel_ids.append(cid)
 
             next_page = data.get('nextPageToken')
@@ -926,8 +928,8 @@ def search_youtube_channels(query):
         if not channels_info:
             return {"items": [], "lang": target_lang}
 
-        # 3. Берем по 10 последних видео для каждого подходящего канала (максимум 45 каналов за раз)
-        candidate_list = list(channels_info.values())[:45]
+        # 3. Берем по 10 последних видео для каждого подходящего канала
+        candidate_list = list(channels_info.values())[:40]
         channel_video_ids = {}
         all_video_ids = []
 
@@ -982,7 +984,6 @@ def search_youtube_channels(query):
                 titles_for_lang.append(v_snip.get('title', ''))
                 dur_sec = parse_yt_duration(v_obj.get('contentDetails', {}).get('duration', ''))
 
-                # Отсекаем Shorts и короткие тизеры (<= 3 минут)
                 if dur_sec > 180:
                     views = int(v_obj.get('statistics', {}).get('viewCount', 0))
                     pub_str = v_snip.get('publishedAt', '')[:10]
@@ -994,11 +995,9 @@ def search_youtube_channels(query):
                         'desc': v_snip.get('description', '')
                     })
 
-            # Проверка языка по названиям канала и роликов
             if not check_yt_language(titles_for_lang, target_lang):
                 continue
 
-            # Должно быть минимум 3 длинных ролика из последних 10 загрузок
             if len(long_videos) < 3:
                 continue
 
@@ -1008,7 +1007,6 @@ def search_youtube_channels(query):
             if avg_dur_min < MIN_AVG_DURATION_MIN or avg_views < MIN_AVG_VIEWS:
                 continue
 
-            # Проверяем дату самого свежего длинного ролика
             long_videos.sort(key=lambda x: x['pub_str'], reverse=True)
             latest_vid = long_videos[0]
             try:
@@ -1018,7 +1016,6 @@ def search_youtube_channels(query):
             except Exception:
                 continue
 
-            # Собираем контакты из описания канала + описаний 3 последних длинных видео
             texts_for_contacts = [ch['desc']] + [v['desc'] for v in long_videos[:3]]
             email, tg, links = extract_yt_contacts(texts_for_contacts)
 
@@ -1026,9 +1023,11 @@ def search_youtube_channels(query):
             has_contact = 1 if (email or tg) else 0
 
             final_results.append({
+                'channel_id': ch['id'],
                 'is_new_flag': 1 if is_new else 0,
                 'has_contact': has_contact,
                 'Статус': '🆕 Новый' if is_new else '♻️ Уже был',
+                'Жанр': genre_name,
                 'Канал': ch['title'],
                 'Подписчики': ch['subs'],
                 'Ср. просмотры': avg_views,
@@ -1042,7 +1041,6 @@ def search_youtube_channels(query):
                 'Ссылка на канал': f"https://www.youtube.com/channel/{ch['id']}"
             })
 
-        # Сортируем: сначала новые, затем с найденными контактами, затем по просмотрам
         final_results.sort(key=lambda x: (x['is_new_flag'], x['has_contact'], x['Ср. просмотры']), reverse=True)
         return {"items": final_results, "lang": target_lang}
 
@@ -1059,6 +1057,7 @@ def generate_yt_excel(data):
         for item in data:
             clean_rows.append({
                 'Статус': item['Статус'],
+                'Жанр': item.get('Жанр', '—'),
                 'Канал': item['Канал'],
                 'Подписчики': item['Подписчики'],
                 'Ср. просмотры': item['Ср. просмотры'],
@@ -1083,8 +1082,8 @@ def generate_yt_excel(data):
             link_font = Font(color="0000FF", underline="single")
 
             widths = {
-                'Статус': 14, 'Канал': 28, 'Подписчики': 15, 'Ср. просмотры': 16,
-                'Ср. длина (мин)': 16, 'Последнее видео': 16, 'Email': 28, 'Telegram': 22,
+                'Статус': 13, 'Жанр': 24, 'Канал': 28, 'Подписчики': 14, 'Ср. просмотры': 15,
+                'Ср. длина (мин)': 15, 'Последнее видео': 15, 'Email': 28, 'Telegram': 22,
                 'Другие ссылки': 35, 'Вкладка О канале': 35, 'Последний ролик': 35, 'Ссылка на канал': 35
             }
 
@@ -1104,6 +1103,7 @@ def generate_yt_excel(data):
                         cell_link.hyperlink = cell_link.value
                         cell_link.font = link_font
 
+            ws.auto_filter.ref = ws.dimensions
             ws.freeze_panes = 'A2'
 
         output.seek(0)
@@ -1146,11 +1146,17 @@ async def btn_course(message: types.Message, state: FSMContext):
 @dp.message_handler(text="🎬 YouTube-каналы", state="*")
 async def btn_youtube(message: types.Message, state: FSMContext):
     await SearchMode.youtube.set()
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("🔥 Авто-сбор: Все 12 ниш (RU)", callback_data="yt_batch|ru"),
+        types.InlineKeyboardButton("🌍 Авто-сбор: Все 12 ниш (EN)", callback_data="yt_batch|en")
+    )
     await message.answer(
         "🎬 <b>РЕЖИМ: ПОИСК YOUTUBE-КАНАЛОВ</b>\n\n"
-        "Напиши тематику канала (на русском или английском — язык определится сам).\n\n"
-        "📌 <i>Примеры:</i> <code>документальное кино</code>, <code>обзор авто</code>, <code>тру крайм</code>, <code>documentary</code>, <code>car review</code>\n\n"
-        "Я отсею Shorts и мёртвые каналы, найду активные (от 20к подписчиков, от 15к просмотров, ролики от 7 минут), соберу Email/Telegram и пришлю Excel.",
+        "Нажми кнопку ниже, чтобы я сам собрал большую таблицу по всем 12 режиссёрским нишам "
+        "(бренды, бьюти, фэшн, лайфстайл, музыка, энтертеймент, спорт, доки, интервью, авто, недвижимость, еда).\n\n"
+        "✍️ <b>Или просто напиши сюда любую свою тему</b> (на русском или английском — язык определится сам).",
+        reply_markup=kb,
         parse_mode="HTML"
     )
 
@@ -1305,6 +1311,105 @@ async def process_youtube_search(message: types.Message, state: FSMContext):
         await message.answer_document(
             types.InputFile(excel_file, filename=f"YT_{safe_name}.xlsx"),
             caption=f"📊 Готовая база: <b>{len(items)}</b> каналов по запросу «{html.escape(query)}».\nВнутри все ссылки, контакты и вкладка «О канале».",
+            parse_mode="HTML"
+        )
+YT_DEFAULT_GENRES = {
+    'ru': [
+        ('Бренды и бизнес', 'бизнес шоу|история бренда'),
+        ('Бьюти', 'бьюти шоу|макияж обзор'),
+        ('Фэшн и стиль', 'мода фэшн|гардероб стиль'),
+        ('Лайфстайл', 'лайфстайл влог|день из жизни'),
+        ('Музыка и бэкстейдж', 'музыкальное шоу|бэкстейдж клип'),
+        ('Энтертеймент и юмор', 'юмористическое шоу|скетч'),
+        ('Спорт и фитнес', 'спорт шоу|фитнес челлендж'),
+        ('Документалки и расследования', 'фильм расследование'),
+        ('Интервью и подкасты', 'большое интервью|видеоподкаст'),
+        ('Авто и тест-драйвы', 'автообзор|тест драйв'),
+        ('Недвижимость и рум-туры', 'рум тур|обзор недвижимости'),
+        ('Еда и гастро-шоу', 'кулинарное шоу|обзор ресторанов'),
+    ],
+    'en': [
+        ('Brands & Business', 'brand documentary|business show'),
+        ('Beauty', 'beauty routine|makeup tutorial'),
+        ('Fashion', 'fashion show|styling lookbook'),
+        ('Lifestyle', 'lifestyle vlog|day in my life'),
+        ('Music & Backstage', 'music documentary|behind the scenes music'),
+        ('Entertainment & Comedy', 'comedy sketch|entertainment show'),
+        ('Sports & Fitness', 'sports documentary|fitness challenge'),
+        ('Documentary', 'documentary film|investigative journalism'),
+        ('Interviews & Podcasts', 'video podcast|interview show'),
+        ('Auto & Cars', 'car review|automotive show'),
+        ('Luxury Real Estate', 'luxury real estate tour'),
+        ('Food & Cooking', 'cooking show|food documentary'),
+    ]
+}
+
+@dp.callback_query_handler(lambda c: c.data.startswith('yt_batch|'), state="*")
+async def yt_batch_handler(cb: types.CallbackQuery):
+    lang = cb.data.split('|')[1]
+    genres = YT_DEFAULT_GENRES.get(lang, YT_DEFAULT_GENRES['ru'])
+    await cb.answer("Запускаю авто-сбор!")
+
+    lang_title = "RU 🇷🇺" if lang == 'ru' else "EN 🇬🇧"
+    wait = await cb.message.answer(
+        f"🚀 <b>Запускаю авто-сбор ({lang_title}) по {len(genres)} нишам...</b>\n"
+        f"<i>Это займёт ~1.5–2 минуты. Буду обновлять статус здесь.</i>",
+        parse_mode="HTML"
+    )
+
+    loop = asyncio.get_running_loop()
+    all_items = []
+    seen_cids = set()
+    stop_error = None
+
+    for idx, (genre_name, kw) in enumerate(genres, 1):
+        with suppress(Exception):
+            await wait.edit_text(
+                f"🎬 <b>Авто-сбор ({lang_title}): шаг {idx} из {len(genres)}</b>\n"
+                f"🔍 Ищу нишу: <code>{html.escape(genre_name)}</code>\n"
+                f"📊 Уже собрано каналов: <b>{len(all_items)}</b>",
+                parse_mode="HTML"
+            )
+
+        res = await loop.run_in_executor(None, search_youtube_channels, kw, 1, genre_name, set(seen_cids))
+
+        if "error" in res:
+            stop_error = res["error"]
+            break
+
+        for ch in res.get("items", []):
+            cid = ch.get('channel_id')
+            if cid and cid not in seen_cids:
+                seen_cids.add(cid)
+                all_items.append(ch)
+
+        await asyncio.sleep(0.3)
+
+    if stop_error and not all_items:
+        await wait.edit_text(f"❌ Ошибка при сборе:\n<code>{html.escape(stop_error[:250])}</code>", parse_mode="HTML")
+        return
+
+    if not all_items:
+        await wait.edit_text("🤷‍♂️ Ничего не нашлось по текущим фильтрам.")
+        return
+
+    all_items.sort(key=lambda x: (x['is_new_flag'], x['has_contact'], x['Ср. просмотры']), reverse=True)
+
+    with suppress(Exception):
+        await wait.delete()
+
+    warn_text = f"\n⚠️ <i>Сбор остановлен досрочно ({html.escape(stop_error[:100])}), отдаю всё, что успел найти.</i>" if stop_error else ""
+
+    excel_file = generate_yt_excel(all_items)
+    if excel_file:
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        await cb.message.answer_document(
+            types.InputFile(excel_file, filename=f"YT_ALL_{lang.upper()}_{date_str}.xlsx"),
+            caption=(
+                f"✅ <b>Авто-сбор ({lang_title}) завершён!</b>\n"
+                f"📊 Собрано уникальных каналов: <b>{len(all_items)}</b>\n"
+                f"В таблице уже проставлен столбец «Жанр» и включены фильтры.{warn_text}"
+            ),
             parse_mode="HTML"
         )
 
