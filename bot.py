@@ -840,15 +840,15 @@ def check_yt_language(texts, target_lang):
     else:
         return cyrillic <= 2 and (latin / total_letters) >= 0.75
 
-def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None):
+def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None, video_duration=None):
     api_key = (os.getenv('YOUTUBE_API_KEY') or '').strip()
     if not api_key:
         return {"error": "NO_KEY"}
 
-    # Настройки "где есть работа и деньги"
-    MIN_SUBS = 20000
-    MAX_SUBS = 3000000
-    MIN_AVG_VIEWS = 15000
+    # Настройки: ловим и гигантов, и молодые растущие каналы
+    MIN_SUBS = 10000
+    MAX_SUBS = 20000000
+    MIN_AVG_VIEWS = 12000
     MIN_AVG_DURATION_MIN = 5.0
     MAX_DAYS_SINCE_LAST = 60
 
@@ -856,25 +856,35 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None)
     genre_name = genre_label or query
     is_russian = bool(re.search(r'[а-яА-ЯёЁ]', query))
     target_lang = 'ru' if is_russian else 'en'
-    published_after = (datetime.utcnow() - timedelta(days=180)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
     try:
-        # 1. Ищем свежие видео по теме
+        # 1. Двойной поиск (до 100 видео на нишу: флагманы + свежие растущие за 30 дней)
+        if video_duration:
+            search_passes = [
+                ('viewCount', video_duration, 90),
+                ('relevance', video_duration, 30)
+            ]
+        else:
+            search_passes = [
+                ('viewCount', 'long', 90),
+                ('relevance', None, 45)
+            ][:pages]
+
         channel_ids = []
-        next_page = None
-        for _ in range(pages):
+        for s_order, s_dur, s_days in search_passes:
+            pub_after = (datetime.utcnow() - timedelta(days=s_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
             params = {
                 'part': 'snippet',
                 'q': query,
                 'type': 'video',
                 'maxResults': 50,
-                'order': 'relevance',
+                'order': s_order,
                 'relevanceLanguage': target_lang,
-                'publishedAfter': published_after,
+                'publishedAfter': pub_after,
                 'key': api_key
             }
-            if next_page:
-                params['pageToken'] = next_page
+            if s_dur:
+                params['videoDuration'] = s_dur
 
             r = requests.get('https://www.googleapis.com/youtube/v3/search', params=params, timeout=15)
             if r.status_code in (400, 403):
@@ -883,17 +893,12 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None)
                 return {"error": f"YT: {err_msg}"}
             if r.status_code != 200:
                 logging.error(f"YT search status {r.status_code}: {r.text}")
-                break
+                continue
 
-            data = r.json()
-            for item in data.get('items', []):
+            for item in r.json().get('items', []):
                 cid = item.get('snippet', {}).get('channelId')
                 if cid and cid not in channel_ids and cid not in exclude_set:
                     channel_ids.append(cid)
-
-            next_page = data.get('nextPageToken')
-            if not next_page:
-                break
 
         if not channel_ids:
             return {"items": [], "lang": target_lang}
@@ -928,26 +933,31 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None)
         if not channels_info:
             return {"items": [], "lang": target_lang}
 
-        # 3. Берем по 10 последних видео для каждого подходящего канала
-        candidate_list = list(channels_info.values())[:40]
+        # 3. Проверяем до 100 каналов (ускоренно в 8 потоков)
+        from concurrent.futures import ThreadPoolExecutor
+        candidate_list = list(channels_info.values())[:100]
         channel_video_ids = {}
         all_video_ids = []
 
-        for ch in candidate_list:
+        def fetch_pl(ch):
             try:
                 r = requests.get(
                     'https://www.googleapis.com/youtube/v3/playlistItems',
                     params={'part': 'contentDetails', 'playlistId': ch['uploads_id'], 'maxResults': 10, 'key': api_key},
                     timeout=10
                 )
-                if r.status_code != 200:
-                    continue
-                vids = [it['contentDetails']['videoId'] for it in r.json().get('items', []) if it.get('contentDetails', {}).get('videoId')]
-                if vids:
-                    channel_video_ids[ch['id']] = vids
-                    all_video_ids.extend(vids)
+                if r.status_code == 200:
+                    vids = [it['contentDetails']['videoId'] for it in r.json().get('items', []) if it.get('contentDetails', {}).get('videoId')]
+                    return ch['id'], vids
             except Exception:
-                continue
+                pass
+            return ch['id'], []
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for ch_id, vids in pool.map(fetch_pl, candidate_list):
+                if vids:
+                    channel_video_ids[ch_id] = vids
+                    all_video_ids.extend(vids)
 
         if not all_video_ids:
             return {"items": [], "lang": target_lang}
@@ -1007,6 +1017,11 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None)
             if avg_dur_min < MIN_AVG_DURATION_MIN or avg_views < MIN_AVG_VIEWS:
                 continue
 
+            title_low = ch['title'].lower()
+            junk_words = ('мелодрам', 'кинокомпот', 'блокбастер', 'русский телик', 'лучшие фильмы', 'новые фильмы', 'kingsize films', 'best film', 'времякино')
+            if any(jw in title_low for jw in junk_words) or (avg_dur_min > 120 and any(w in title_low for w in ('кино', 'фильм', 'сериал'))):
+                continue
+
             long_videos.sort(key=lambda x: x['pub_str'], reverse=True)
             latest_vid = long_videos[0]
             try:
@@ -1022,14 +1037,24 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None)
             is_new = is_new_yt_channel(ch['id'])
             has_contact = 1 if (email or tg) else 0
 
+            # Определяем сегмент: растущий, флагман или активный середняк
+            subs = ch['subs']
+            if subs <= 300000 and avg_views >= subs * 0.45:
+                segment = '🚀 Растущий'
+            elif subs >= 500000:
+                segment = '🔥 Флагман'
+            else:
+                segment = '💼 Активный'
+
             final_results.append({
                 'channel_id': ch['id'],
                 'is_new_flag': 1 if is_new else 0,
                 'has_contact': has_contact,
                 'Статус': '🆕 Новый' if is_new else '♻️ Уже был',
                 'Жанр': genre_name,
+                'Сегмент': segment,
                 'Канал': ch['title'],
-                'Подписчики': ch['subs'],
+                'Подписчики': subs,
                 'Ср. просмотры': avg_views,
                 'Ср. длина (мин)': round(avg_dur_min, 1),
                 'Последнее видео': latest_vid['pub_str'],
@@ -1038,7 +1063,10 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None)
                 'Другие ссылки': links if links else '—',
                 'Вкладка О канале': f"https://www.youtube.com/channel/{ch['id']}/about",
                 'Последний ролик': f"https://www.youtube.com/watch?v={latest_vid['id']}",
-                'Ссылка на канал': f"https://www.youtube.com/channel/{ch['id']}"
+                'Ссылка на канал': f"https://www.youtube.com/channel/{ch['id']}",
+                'Имя': '',
+                'Отправлять': 'да' if email else '',
+                'Статус_отправки': ''
             })
 
         final_results.sort(key=lambda x: (x['is_new_flag'], x['has_contact'], x['Ср. просмотры']), reverse=True)
@@ -1046,6 +1074,98 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None)
 
     except Exception as e:
         logging.error(f"YouTube search error: {e}")
+        return {"error": str(e)}
+
+def fetch_channels_by_handles(handles):
+    api_key = (os.getenv('YOUTUBE_API_KEY') or '').strip()
+    if not api_key:
+        return {"error": "NO_KEY"}
+
+    results = []
+    try:
+        for h in handles[:50]:
+            clean_h = h.lstrip('@').strip()
+            r = requests.get(
+                'https://www.googleapis.com/youtube/v3/channels',
+                params={'part': 'snippet,statistics,contentDetails', 'forHandle': clean_h, 'key': api_key},
+                timeout=15
+            )
+            if r.status_code != 200 or not r.json().get('items'):
+                continue
+            item = r.json()['items'][0]
+            cid = item['id']
+            title = item.get('snippet', {}).get('title', clean_h)
+            desc = item.get('snippet', {}).get('description', '')
+            subs = int(item.get('statistics', {}).get('subscriberCount', 0))
+            uploads_id = item.get('contentDetails', {}).get('relatedPlaylists', {}).get('uploads')
+
+            long_videos = []
+            if uploads_id:
+                pr = requests.get(
+                    'https://www.googleapis.com/youtube/v3/playlistItems',
+                    params={'part': 'contentDetails', 'playlistId': uploads_id, 'maxResults': 10, 'key': api_key},
+                    timeout=10
+                )
+                vids = [it['contentDetails']['videoId'] for it in pr.json().get('items', []) if it.get('contentDetails', {}).get('videoId')]
+                if vids:
+                    vr = requests.get(
+                        'https://www.googleapis.com/youtube/v3/videos',
+                        params={'part': 'snippet,contentDetails,statistics', 'id': ','.join(vids), 'key': api_key},
+                        timeout=15
+                    )
+                    for v in vr.json().get('items', []):
+                        dur_sec = parse_yt_duration(v.get('contentDetails', {}).get('duration', ''))
+                        if dur_sec > 180:
+                            long_videos.append({
+                                'id': v['id'],
+                                'dur_sec': dur_sec,
+                                'views': int(v.get('statistics', {}).get('viewCount', 0)),
+                                'pub_str': v.get('snippet', {}).get('publishedAt', '')[:10],
+                                'desc': v.get('snippet', {}).get('description', '')
+                            })
+
+            long_videos.sort(key=lambda x: x['pub_str'], reverse=True)
+            avg_dur = round(sum(v['dur_sec'] for v in long_videos) / len(long_videos) / 60.0, 1) if long_videos else 0
+            avg_views = int(sum(v['views'] for v in long_videos) / len(long_videos)) if long_videos else 0
+            latest_vid_id = long_videos[0]['id'] if long_videos else ''
+            latest_date = long_videos[0]['pub_str'] if long_videos else '—'
+
+            texts_for_contacts = [desc] + [v['desc'] for v in long_videos[:3]]
+            email, tg, links = extract_yt_contacts(texts_for_contacts)
+            is_new = is_new_yt_channel(cid)
+
+            if subs <= 300000 and avg_views >= subs * 0.45:
+                segment = '🚀 Растущий'
+            elif subs >= 500000:
+                segment = '🔥 Флагман'
+            else:
+                segment = '💼 Активный'
+
+            results.append({
+                'channel_id': cid,
+                'is_new_flag': 1 if is_new else 0,
+                'has_contact': 1 if (email or tg) else 0,
+                'Статус': '🆕 Новый' if is_new else '♻️ Уже был',
+                'Жанр': 'Свой список',
+                'Сегмент': segment,
+                'Канал': title,
+                'Подписчики': subs,
+                'Ср. просмотры': avg_views,
+                'Ср. длина (мин)': avg_dur,
+                'Последнее видео': latest_date,
+                'Email': email if email else '—',
+                'Telegram': tg if tg else '—',
+                'Другие ссылки': links if links else '—',
+                'Вкладка О канале': f"https://www.youtube.com/channel/{cid}/about",
+                'Последний ролик': f"https://www.youtube.com/watch?v={latest_vid_id}" if latest_vid_id else '—',
+                'Ссылка на канал': f"https://www.youtube.com/channel/{cid}",
+                'Имя': '',
+                'Отправлять': 'да' if email else '',
+                'Статус_отправки': ''
+            })
+        return {"items": results, "lang": "ru"}
+    except Exception as e:
+        logging.error(f"Handles error: {e}")
         return {"error": str(e)}
 
 def generate_yt_excel(data):
@@ -1058,6 +1178,7 @@ def generate_yt_excel(data):
             clean_rows.append({
                 'Статус': item['Статус'],
                 'Жанр': item.get('Жанр', '—'),
+                'Сегмент': item.get('Сегмент', '—'),
                 'Канал': item['Канал'],
                 'Подписчики': item['Подписчики'],
                 'Ср. просмотры': item['Ср. просмотры'],
@@ -1069,34 +1190,37 @@ def generate_yt_excel(data):
                 'Вкладка О канале': item['Вкладка О канале'],
                 'Последний ролик': item['Последний ролик'],
                 'Ссылка на канал': item['Ссылка на канал'],
+                'Имя': item.get('Имя', ''),
+                'Отправлять': item.get('Отправлять', ''),
+                'Статус_отправки': item.get('Статус_отправки', ''),
             })
 
         df = pd.DataFrame(clean_rows)
         output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='YouTube_Каналы')
-            ws = writer.sheets['YouTube_Каналы']
 
+        def format_ws(ws, target_df):
             header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
             header_font = Font(color="FFFFFF", bold=True)
             link_font = Font(color="0000FF", underline="single")
 
             widths = {
-                'Статус': 13, 'Жанр': 24, 'Канал': 28, 'Подписчики': 14, 'Ср. просмотры': 15,
-                'Ср. длина (мин)': 15, 'Последнее видео': 15, 'Email': 28, 'Telegram': 22,
-                'Другие ссылки': 35, 'Вкладка О канале': 35, 'Последний ролик': 35, 'Ссылка на канал': 35
+                'Статус': 13, 'Жанр': 25, 'Сегмент': 15, 'Канал': 28, 'Подписчики': 14,
+                'Ср. просмотры': 15, 'Ср. длина (мин)': 15, 'Последнее видео': 15,
+                'Email': 28, 'Telegram': 22, 'Другие ссылки': 35, 'Вкладка О канале': 35,
+                'Последний ролик': 35, 'Ссылка на канал': 35, 'Имя': 20,
+                'Отправлять': 14, 'Статус_отправки': 22
             }
 
-            for col_num, col_name in enumerate(df.columns):
+            for col_num, col_name in enumerate(target_df.columns):
                 cell = ws.cell(row=1, column=col_num + 1)
                 cell.fill = header_fill
                 cell.font = header_font
                 ws.column_dimensions[chr(65 + col_num)].width = widths.get(col_name, 20)
 
             link_cols = ['Вкладка О канале', 'Последний ролик', 'Ссылка на канал']
-            link_indices = [df.columns.get_loc(c) + 1 for c in link_cols if c in df.columns]
+            link_indices = [target_df.columns.get_loc(c) + 1 for c in link_cols if c in target_df.columns]
 
-            for row in range(2, len(df) + 2):
+            for row in range(2, len(target_df) + 2):
                 for idx in link_indices:
                     cell_link = ws.cell(row=row, column=idx)
                     if cell_link.value and str(cell_link.value).startswith('http'):
@@ -1106,11 +1230,39 @@ def generate_yt_excel(data):
             ws.auto_filter.ref = ws.dimensions
             ws.freeze_panes = 'A2'
 
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Все_каналы')
+            format_ws(writer.sheets['Все_каналы'], df)
+
+            df_growing = df[df['Сегмент'] == '🚀 Растущий']
+            if not df_growing.empty:
+                df_growing.to_excel(writer, index=False, sheet_name='Растущие')
+                format_ws(writer.sheets['Растущие'], df_growing)
+
         output.seek(0)
         return output
     except Exception as e:
         logging.error(f"YouTube Excel error: {e}")
         return None
+
+def send_to_google_sheet(items):
+    gs_url = (os.getenv('GSHEET_URL') or '').strip()
+    if not gs_url or not items:
+        return None
+    keys = [
+        'Статус', 'Жанр', 'Сегмент', 'Канал', 'Подписчики', 'Ср. просмотры', 'Ср. длина (мин)',
+        'Последнее видео', 'Email', 'Telegram', 'Другие ссылки',
+        'Вкладка О канале', 'Последний ролик', 'Ссылка на канал',
+        'Имя', 'Отправлять', 'Статус_отправки'
+    ]
+    rows_payload = [{k: item.get(k, '') for k in keys} for item in items]
+    try:
+        r = requests.post(gs_url, json={'rows': rows_payload}, timeout=30)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        logging.error(f"Google Sheet sync error: {e}")
+    return None
 
 @dp.message_handler(commands=['start'], state="*")
 async def start_cmd(message: types.Message, state: FSMContext):
@@ -1148,14 +1300,15 @@ async def btn_youtube(message: types.Message, state: FSMContext):
     await SearchMode.youtube.set()
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton("🔥 Авто-сбор: Все 12 ниш (RU)", callback_data="yt_batch|ru"),
-        types.InlineKeyboardButton("🌍 Авто-сбор: Все 12 ниш (EN)", callback_data="yt_batch|en")
+        types.InlineKeyboardButton("🔥 Авто-сбор: Все 14 ниш (RU)", callback_data="yt_batch|ru"),
+        types.InlineKeyboardButton("🌍 Авто-сбор: Все 14 ниш (EN)", callback_data="yt_batch|en")
     )
     await message.answer(
         "🎬 <b>РЕЖИМ: ПОИСК YOUTUBE-КАНАЛОВ</b>\n\n"
-        "Нажми кнопку ниже, чтобы я сам собрал большую таблицу по всем 12 режиссёрским нишам "
-        "(бренды, бьюти, фэшн, лайфстайл, музыка, энтертеймент, спорт, доки, интервью, авто, недвижимость, еда).\n\n"
-        "✍️ <b>Или просто напиши сюда любую свою тему</b> (на русском или английском — язык определится сам).",
+        "Нажми кнопку ниже, чтобы я собрал большую базу по 14 нишам (и гигантов, и молодые 🚀 растущие каналы).\n\n"
+        "✍️ <b>Или напиши сюда:</b>\n"
+        "• любую свою тему (<code>документалка</code>, <code>documentary</code>)\n"
+        "• либо список каналов через @ или ссылки (<code>@GEOSHOW @redactsiya</code>) — я вытащу их контакты в таблицу.",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -1261,19 +1414,24 @@ async def process_youtube_search(message: types.Message, state: FSMContext):
         return
 
     query = message.text.strip()
+    handles = re.findall(r'@([a-zA-Z0-9_.-]{2,35})', query)
+
     wait = await message.answer(
-        f"🎬 Ищу живые каналы по теме: <b>{html.escape(query)}</b>...\n"
-        f"<i>Проверяю аудиторию, отсеиваю Shorts и собираю контакты (это займет 15–25 секунд).</i>",
+        f"🎬 Собираю данные по {'твоему списку каналов' if handles else f'теме <b>{html.escape(query)}</b>'}...\n"
+        f"<i>Проверяю до 100 каналов, просмотры и контакты (15–30 секунд).</i>",
         parse_mode="HTML"
     )
 
     loop = asyncio.get_running_loop()
-    res = await loop.run_in_executor(None, search_youtube_channels, query)
+    if handles:
+        res = await loop.run_in_executor(None, fetch_channels_by_handles, handles)
+    else:
+        res = await loop.run_in_executor(None, search_youtube_channels, query, 2, query, None, None)
 
     if "error" in res:
         err = res["error"]
         if err == "NO_KEY":
-            await wait.edit_text("❌ Не найден ключ <code>YOUTUBE_API_KEY</code>. Добавь его в переменные окружения на хостинге.", parse_mode="HTML")
+            await wait.edit_text("❌ Не найден ключ <code>YOUTUBE_API_KEY</code>.", parse_mode="HTML")
         else:
             await wait.edit_text(f"❌ Ошибка при поиске:\n<code>{html.escape(err[:250])}</code>", parse_mode="HTML")
         return
@@ -1281,22 +1439,19 @@ async def process_youtube_search(message: types.Message, state: FSMContext):
     items = res.get("items", [])
     if not items:
         await wait.edit_text(
-            f"🤷‍♂️ По запросу <b>«{html.escape(query)}»</b> не нашлось каналов, проходящих под «денежные» фильтры "
-            f"(от 20к подписчиков, от 15к просмотров, длинные ролики от 7 минут).\n\n"
-            f"Попробуй написать запрос чуть шире (например, <code>авто</code> вместо <code>ремонт старых бмв</code>).",
+            f"🤷‍♂️ По запросу <b>«{html.escape(query)}»</b> ничего не нашлось по текущим фильтрам.",
             parse_mode="HTML"
         )
         return
 
-    lang_label = "🇷🇺 RU" if res.get("lang") == "ru" else "🇬🇧 EN"
-    preview_text = f"✅ Найдено каналов ({lang_label}): <b>{len(items)}</b>\n<b>Топ-5 из выборки:</b>\n\n"
+    preview_text = f"✅ Найдено каналов: <b>{len(items)}</b>\n<b>Топ-5 из выборки:</b>\n\n"
     for ch in items[:5]:
         contacts = []
         if ch['Email'] != '—': contacts.append(f"📧 {ch['Email']}")
         if ch['Telegram'] != '—': contacts.append(f"✈️ {ch['Telegram']}")
         c_str = " | ".join(contacts) if contacts else "🔒 Почта под капчей (см. ссылку в Excel)"
         preview_text += (
-            f"{ch['Статус']} <b>{html.escape(ch['Канал'])}</b>\n"
+            f"{ch['Статус']} | {ch['Сегмент']} <b>{html.escape(ch['Канал'])}</b>\n"
             f"👥 {ch['Подписчики']:,} | 👁 ~{ch['Ср. просмотры']:,} | ⏱ {ch['Ср. длина (мин)']} мин\n"
             f"{c_str}\n"
             f"{ch['Ссылка на канал']}\n\n"
@@ -1305,42 +1460,58 @@ async def process_youtube_search(message: types.Message, state: FSMContext):
     await wait.delete()
     await message.answer(preview_text, parse_mode="HTML", disable_web_page_preview=True)
 
+    gs_res = await loop.run_in_executor(None, send_to_google_sheet, items)
+    gs_kb = None
+    gs_caption = ""
+    if gs_res and gs_res.get('ok'):
+        gs_caption = f"\n📥 В Google Таблицу добавлено новых строк: <b>{gs_res.get('added', 0)}</b>"
+        if gs_res.get('url'):
+            gs_kb = types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("📊 Открыть Google Таблицу", url=gs_res['url'])
+            )
+
     excel_file = generate_yt_excel(items)
     if excel_file:
         safe_name = re.sub(r'[^\w\s-]', '', query).strip().replace(' ', '_')[:25] or 'channels'
         await message.answer_document(
             types.InputFile(excel_file, filename=f"YT_{safe_name}.xlsx"),
-            caption=f"📊 Готовая база: <b>{len(items)}</b> каналов по запросу «{html.escape(query)}».\nВнутри все ссылки, контакты и вкладка «О канале».",
+            caption=f"📊 Готовая база: <b>{len(items)}</b> каналов.{gs_caption}",
+            reply_markup=gs_kb,
             parse_mode="HTML"
         )
+
 YT_DEFAULT_GENRES = {
     'ru': [
-        ('Бренды и бизнес', 'бизнес шоу|история бренда'),
-        ('Бьюти', 'бьюти шоу|макияж обзор'),
-        ('Фэшн и стиль', 'мода фэшн|гардероб стиль'),
-        ('Лайфстайл', 'лайфстайл влог|день из жизни'),
-        ('Музыка и бэкстейдж', 'музыкальное шоу|бэкстейдж клип'),
-        ('Энтертеймент и юмор', 'юмористическое шоу|скетч'),
-        ('Спорт и фитнес', 'спорт шоу|фитнес челлендж'),
-        ('Документалки и расследования', 'фильм расследование'),
-        ('Интервью и подкасты', 'большое интервью|видеоподкаст'),
-        ('Авто и тест-драйвы', 'автообзор|тест драйв'),
-        ('Недвижимость и рум-туры', 'рум тур|обзор недвижимости'),
-        ('Еда и гастро-шоу', 'кулинарное шоу|обзор ресторанов'),
+        ('Научпоп, космос и история', 'космос|наука|история|аномалии|мифы', 'long'),
+        ('Журналистика и расследования', 'расследование|репортаж|журналистика|новости неделя', 'long'),
+        ('Интервью и подкасты', 'большое интервью|подкаст|ток шоу', 'long'),
+        ('Юмор и энтертеймент', 'юмористическое шоу|стендап|импровизация|скетч', 'long'),
+        ('Бренды и бизнес', 'бизнес шоу|история бренда|как устроен бизнес', 'long'),
+        ('Авто и тест-драйвы', 'автообзор|тест драйв|автоподбор', 'long'),
+        ('Недвижимость и рум-туры', 'рум тур|обзор квартиры|элитная недвижимость', 'long'),
+        ('Тревел-шоу', 'путешествие|экспедиция|тревел влог', 'long'),
+        ('Еда и гастро-шоу', 'кулинарное шоу|обзор ресторанов|фуд шоу', 'long'),
+        ('Бьюти', 'бьюти шоу|макияж обзор', 'medium'),
+        ('Фэшн и стиль', 'мода фэшн|разбор гардероба|стиль', 'medium'),
+        ('Лайфстайл', 'лайфстайл влог|день из жизни', 'medium'),
+        ('Музыка и бэкстейдж', 'музыкальное шоу|бэкстейдж клипа|разбор трека', 'medium'),
+        ('Спорт и фитнес', 'спорт шоу|фитнес челлендж|бои обзор', 'medium'),
     ],
     'en': [
-        ('Brands & Business', 'brand documentary|business show'),
-        ('Beauty', 'beauty routine|makeup tutorial'),
-        ('Fashion', 'fashion show|styling lookbook'),
-        ('Lifestyle', 'lifestyle vlog|day in my life'),
-        ('Music & Backstage', 'music documentary|behind the scenes music'),
-        ('Entertainment & Comedy', 'comedy sketch|entertainment show'),
-        ('Sports & Fitness', 'sports documentary|fitness challenge'),
-        ('Documentary', 'documentary film|investigative journalism'),
-        ('Interviews & Podcasts', 'video podcast|interview show'),
-        ('Auto & Cars', 'car review|automotive show'),
-        ('Luxury Real Estate', 'luxury real estate tour'),
-        ('Food & Cooking', 'cooking show|food documentary'),
+        ('Science, Space & History', 'space documentary|history mystery|science explained', 'long'),
+        ('Investigative Journalism', 'investigative journalism|video essay|documentary', 'long'),
+        ('Interviews & Podcasts', 'video podcast|interview show', 'long'),
+        ('Entertainment & Comedy', 'comedy show|entertainment show|sketch comedy', 'long'),
+        ('Brands & Business', 'brand documentary|business story|how it is made', 'long'),
+        ('Auto & Cars', 'car review|automotive show', 'long'),
+        ('Luxury Real Estate', 'luxury real estate tour|house tour', 'long'),
+        ('Travel Shows', 'travel documentary|expedition vlog', 'long'),
+        ('Food & Cooking', 'cooking show|food documentary|restaurant review', 'long'),
+        ('Beauty', 'beauty routine|makeup tutorial', 'medium'),
+        ('Fashion', 'fashion show|styling lookbook', 'medium'),
+        ('Lifestyle', 'lifestyle vlog|day in my life', 'medium'),
+        ('Music & Backstage', 'music documentary|behind the scenes music', 'medium'),
+        ('Sports & Fitness', 'sports documentary|fitness challenge', 'medium'),
     ]
 }
 
@@ -1353,7 +1524,7 @@ async def yt_batch_handler(cb: types.CallbackQuery):
     lang_title = "RU 🇷🇺" if lang == 'ru' else "EN 🇬🇧"
     wait = await cb.message.answer(
         f"🚀 <b>Запускаю авто-сбор ({lang_title}) по {len(genres)} нишам...</b>\n"
-        f"<i>Это займёт ~1.5–2 минуты. Буду обновлять статус здесь.</i>",
+        f"<i>Собираю и флагманов, и молодые растущие каналы (~2 минуты).</i>",
         parse_mode="HTML"
     )
 
@@ -1362,7 +1533,7 @@ async def yt_batch_handler(cb: types.CallbackQuery):
     seen_cids = set()
     stop_error = None
 
-    for idx, (genre_name, kw) in enumerate(genres, 1):
+    for idx, (genre_name, kw, v_dur) in enumerate(genres, 1):
         with suppress(Exception):
             await wait.edit_text(
                 f"🎬 <b>Авто-сбор ({lang_title}): шаг {idx} из {len(genres)}</b>\n"
@@ -1371,7 +1542,7 @@ async def yt_batch_handler(cb: types.CallbackQuery):
                 parse_mode="HTML"
             )
 
-        res = await loop.run_in_executor(None, search_youtube_channels, kw, 1, genre_name, set(seen_cids))
+        res = await loop.run_in_executor(None, search_youtube_channels, kw, 1, genre_name, set(seen_cids), v_dur)
 
         if "error" in res:
             stop_error = res["error"]
@@ -1394,9 +1565,20 @@ async def yt_batch_handler(cb: types.CallbackQuery):
         return
 
     all_items.sort(key=lambda x: (x['is_new_flag'], x['has_contact'], x['Ср. просмотры']), reverse=True)
+    all_items.sort(key=lambda x: x['Жанр'])
 
     with suppress(Exception):
         await wait.delete()
+
+    gs_res = await loop.run_in_executor(None, send_to_google_sheet, all_items)
+    gs_kb = None
+    gs_caption = ""
+    if gs_res and gs_res.get('ok'):
+        gs_caption = f"\n📥 В Google Таблицу добавлено новых строк: <b>{gs_res.get('added', 0)}</b>"
+        if gs_res.get('url'):
+            gs_kb = types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("📊 Открыть Google Таблицу", url=gs_res['url'])
+            )
 
     warn_text = f"\n⚠️ <i>Сбор остановлен досрочно ({html.escape(stop_error[:100])}), отдаю всё, что успел найти.</i>" if stop_error else ""
 
@@ -1407,9 +1589,9 @@ async def yt_batch_handler(cb: types.CallbackQuery):
             types.InputFile(excel_file, filename=f"YT_ALL_{lang.upper()}_{date_str}.xlsx"),
             caption=(
                 f"✅ <b>Авто-сбор ({lang_title}) завершён!</b>\n"
-                f"📊 Собрано уникальных каналов: <b>{len(all_items)}</b>\n"
-                f"В таблице уже проставлен столбец «Жанр» и включены фильтры.{warn_text}"
+                f"📊 Собрано уникальных каналов: <b>{len(all_items)}</b>{gs_caption}{warn_text}"
             ),
+            reply_markup=gs_kb,
             parse_mode="HTML"
         )
 
