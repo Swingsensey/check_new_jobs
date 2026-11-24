@@ -76,13 +76,14 @@ dp = Dispatcher(bot, storage=storage)
 
 # Создаем состояния (режимы)
 class SearchMode(StatesGroup):
-    course = State() # Включен режим курсов (если состояния нет — ищем работу)
+    course = State() # Включен режим курсов
+    youtube = State() # Включен режим поиска YouTube-каналов
 
 # Создаем постоянное меню с кнопками
 def get_main_kb():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add(KeyboardButton("💼 Искать работу"), KeyboardButton("🎓 Искать курсы"))
-    kb.add(KeyboardButton("🔔 Мои подписки"))
+    kb.add(KeyboardButton("🎬 YouTube-каналы"), KeyboardButton("🔔 Мои подписки"))
     return kb
 logging.basicConfig(level=logging.INFO)
 
@@ -107,8 +108,21 @@ def init_db():
     conn = sqlite3.connect('manager.db')
     conn.execute('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY)')
     conn.execute('CREATE TABLE IF NOT EXISTS subs (user_id INTEGER, keyword TEXT, UNIQUE(user_id, keyword))')
+    conn.execute('CREATE TABLE IF NOT EXISTS yt_channels (channel_id TEXT PRIMARY KEY)')
     conn.commit()
     conn.close()
+
+def is_new_yt_channel(channel_id):
+    conn = sqlite3.connect('manager.db', timeout=20)
+    conn.execute('CREATE TABLE IF NOT EXISTS yt_channels (channel_id TEXT PRIMARY KEY)')
+    res = conn.execute('SELECT 1 FROM yt_channels WHERE channel_id = ?', (channel_id,)).fetchone()
+    if not res:
+        conn.execute('INSERT INTO yt_channels VALUES (?)', (channel_id,))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
 
 def add_subscription(user_id, keyword):
     conn = sqlite3.connect('manager.db')
@@ -761,6 +775,342 @@ def generate_excel(data):
         return None
 
 # --- ОБРАБОТЧИКИ ---
+# --- YOUTUBE ПАРСЕР ДЛЯ РЕЖИССЁРА ---
+def parse_yt_duration(duration_str):
+    match = re.match(r'P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration_str or '')
+    if not match:
+        return 0
+    d = int(match.group(1) or 0)
+    h = int(match.group(2) or 0)
+    m = int(match.group(3) or 0)
+    s = int(match.group(4) or 0)
+    return d * 86400 + h * 3600 + m * 60 + s
+
+def extract_yt_contacts(texts):
+    full_text = "\n".join([t for t in texts if t])
+    
+    # 1. Ищем Email
+    raw_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', full_text)
+    bad_ext = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg')
+    emails = []
+    for e in raw_emails:
+        e_low = e.lower()
+        if not e_low.endswith(bad_ext) and 'example.com' not in e_low:
+            if e_low not in emails:
+                emails.append(e_low)
+
+    # 2. Ищем Telegram (ссылки t.me/... и @ники рядом со словами про рекламу/менеджера)
+    tgs = []
+    for m in re.findall(r'(?:https?://)?(?:t\.me|telegram\.me)/(?!joinchat|\+)([a-zA-Z0-9_]{4,32})', full_text, flags=re.IGNORECASE):
+        handle = f"@{m}"
+        if handle.lower() not in [x.lower() for x in tgs]:
+            tgs.append(handle)
+
+    tg_keywords = ('тг', 'tg', 'телеграм', 'telegram', 'менеджер', 'manager', 'реклам', 'сотруднич', 'pr', 'пиар', 'связ', 'contact', 'business', 'коммерц', 'агент', 'продюсер')
+    for line in full_text.splitlines():
+        line_low = line.lower()
+        if any(kw in line_low for kw in tg_keywords):
+            for m in re.findall(r'(?<![a-zA-Z0-9._%+-])@([a-zA-Z0-9_]{5,32})', line):
+                handle = f"@{m}"
+                if handle.lower() not in [x.lower() for x in tgs]:
+                    tgs.append(handle)
+
+    # 3. Прочие внешние ссылки (сайты, Taplink, Linktree, соцсети)
+    raw_urls = re.findall(r'https?://[^\s\)\]\>\"\'<]+', full_text)
+    other_links = []
+    skip_domains = ('youtube.com', 'youtu.be', 't.me', 'telegram.me', 'bit.ly', 'clck.ru')
+    for u in raw_urls:
+        u_clean = u.rstrip('.,;:!?')
+        u_low = u_clean.lower()
+        if not any(d in u_low for d in skip_domains):
+            if u_clean not in other_links:
+                other_links.append(u_clean)
+
+    return ", ".join(emails[:3]), ", ".join(tgs[:3]), ", ".join(other_links[:3])
+
+def check_yt_language(texts, target_lang):
+    combined = " ".join(texts)
+    cyrillic = len(re.findall(r'[а-яА-ЯёЁ]', combined))
+    latin = len(re.findall(r'[a-zA-Z]', combined))
+    total_letters = cyrillic + latin
+    if total_letters == 0:
+        return False
+    if target_lang == 'ru':
+        return cyrillic >= 10 and (cyrillic / total_letters) >= 0.25
+    else:
+        return cyrillic <= 2 and (latin / total_letters) >= 0.75
+
+def search_youtube_channels(query):
+    api_key = (os.getenv('YOUTUBE_API_KEY') or '').strip()
+    if not api_key:
+        return {"error": "NO_KEY"}
+
+    # Настройки "где есть работа и деньги"
+    MIN_SUBS = 20000
+    MAX_SUBS = 3000000
+    MIN_AVG_VIEWS = 15000
+    MIN_AVG_DURATION_MIN = 7.0
+    MAX_DAYS_SINCE_LAST = 60
+
+    is_russian = bool(re.search(r'[а-яА-ЯёЁ]', query))
+    target_lang = 'ru' if is_russian else 'en'
+    published_after = (datetime.utcnow() - timedelta(days=180)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    try:
+        # 1. Ищем свежие видео по теме (2 страницы = до 100 видео)
+        channel_ids = []
+        next_page = None
+        for _ in range(2):
+            params = {
+                'part': 'snippet',
+                'q': query,
+                'type': 'video',
+                'maxResults': 50,
+                'order': 'relevance',
+                'relevanceLanguage': target_lang,
+                'publishedAfter': published_after,
+                'key': api_key
+            }
+            if next_page:
+                params['pageToken'] = next_page
+
+            r = requests.get('https://www.googleapis.com/youtube/v3/search', params=params, timeout=15)
+            if r.status_code in (400, 403):
+                err_msg = r.json().get('error', {}).get('message', r.text)
+                logging.error(f"YT API error {r.status_code}: {err_msg}")
+                return {"error": f"YT: {err_msg}"}
+            if r.status_code != 200:
+                logging.error(f"YT search status {r.status_code}: {r.text}")
+                break
+
+            data = r.json()
+            for item in data.get('items', []):
+                cid = item.get('snippet', {}).get('channelId')
+                if cid and cid not in channel_ids:
+                    channel_ids.append(cid)
+
+            next_page = data.get('nextPageToken')
+            if not next_page:
+                break
+
+        if not channel_ids:
+            return {"items": [], "lang": target_lang}
+
+        # 2. Получаем данные о каналах пачками по 50
+        channels_info = {}
+        for i in range(0, len(channel_ids), 50):
+            chunk = channel_ids[i:i+50]
+            r = requests.get(
+                'https://www.googleapis.com/youtube/v3/channels',
+                params={'part': 'snippet,statistics,contentDetails', 'id': ','.join(chunk), 'key': api_key},
+                timeout=15
+            )
+            if r.status_code != 200:
+                continue
+            for item in r.json().get('items', []):
+                stats = item.get('statistics', {})
+                if stats.get('hiddenSubscriberCount'):
+                    continue
+                subs = int(stats.get('subscriberCount', 0))
+                if MIN_SUBS <= subs <= MAX_SUBS:
+                    uploads_id = item.get('contentDetails', {}).get('relatedPlaylists', {}).get('uploads')
+                    if uploads_id:
+                        channels_info[item['id']] = {
+                            'id': item['id'],
+                            'title': item.get('snippet', {}).get('title', 'Без названия'),
+                            'desc': item.get('snippet', {}).get('description', ''),
+                            'subs': subs,
+                            'uploads_id': uploads_id
+                        }
+
+        if not channels_info:
+            return {"items": [], "lang": target_lang}
+
+        # 3. Берем по 10 последних видео для каждого подходящего канала (максимум 45 каналов за раз)
+        candidate_list = list(channels_info.values())[:45]
+        channel_video_ids = {}
+        all_video_ids = []
+
+        for ch in candidate_list:
+            try:
+                r = requests.get(
+                    'https://www.googleapis.com/youtube/v3/playlistItems',
+                    params={'part': 'contentDetails', 'playlistId': ch['uploads_id'], 'maxResults': 10, 'key': api_key},
+                    timeout=10
+                )
+                if r.status_code != 200:
+                    continue
+                vids = [it['contentDetails']['videoId'] for it in r.json().get('items', []) if it.get('contentDetails', {}).get('videoId')]
+                if vids:
+                    channel_video_ids[ch['id']] = vids
+                    all_video_ids.extend(vids)
+            except Exception:
+                continue
+
+        if not all_video_ids:
+            return {"items": [], "lang": target_lang}
+
+        # 4. Выгружаем статистику и длительность всех видео пачками по 50
+        videos_data = {}
+        unique_vids = list(dict.fromkeys(all_video_ids))
+        for i in range(0, len(unique_vids), 50):
+            chunk = unique_vids[i:i+50]
+            r = requests.get(
+                'https://www.googleapis.com/youtube/v3/videos',
+                params={'part': 'snippet,contentDetails,statistics', 'id': ','.join(chunk), 'key': api_key},
+                timeout=15
+            )
+            if r.status_code != 200:
+                continue
+            for v in r.json().get('items', []):
+                videos_data[v['id']] = v
+
+        # 5. Финальный отбор каналов
+        final_results = []
+        now_utc = datetime.utcnow()
+
+        for ch in candidate_list:
+            vids = channel_video_ids.get(ch['id'], [])
+            long_videos = []
+            titles_for_lang = [ch['title']]
+
+            for vid in vids:
+                v_obj = videos_data.get(vid)
+                if not v_obj:
+                    continue
+                v_snip = v_obj.get('snippet', {})
+                titles_for_lang.append(v_snip.get('title', ''))
+                dur_sec = parse_yt_duration(v_obj.get('contentDetails', {}).get('duration', ''))
+
+                # Отсекаем Shorts и короткие тизеры (<= 3 минут)
+                if dur_sec > 180:
+                    views = int(v_obj.get('statistics', {}).get('viewCount', 0))
+                    pub_str = v_snip.get('publishedAt', '')[:10]
+                    long_videos.append({
+                        'id': vid,
+                        'dur_sec': dur_sec,
+                        'views': views,
+                        'pub_str': pub_str,
+                        'desc': v_snip.get('description', '')
+                    })
+
+            # Проверка языка по названиям канала и роликов
+            if not check_yt_language(titles_for_lang, target_lang):
+                continue
+
+            # Должно быть минимум 3 длинных ролика из последних 10 загрузок
+            if len(long_videos) < 3:
+                continue
+
+            avg_dur_min = sum(v['dur_sec'] for v in long_videos) / len(long_videos) / 60.0
+            avg_views = int(sum(v['views'] for v in long_videos) / len(long_videos))
+
+            if avg_dur_min < MIN_AVG_DURATION_MIN or avg_views < MIN_AVG_VIEWS:
+                continue
+
+            # Проверяем дату самого свежего длинного ролика
+            long_videos.sort(key=lambda x: x['pub_str'], reverse=True)
+            latest_vid = long_videos[0]
+            try:
+                latest_dt = datetime.strptime(latest_vid['pub_str'], '%Y-%m-%d')
+                if (now_utc - latest_dt).days > MAX_DAYS_SINCE_LAST:
+                    continue
+            except Exception:
+                continue
+
+            # Собираем контакты из описания канала + описаний 3 последних длинных видео
+            texts_for_contacts = [ch['desc']] + [v['desc'] for v in long_videos[:3]]
+            email, tg, links = extract_yt_contacts(texts_for_contacts)
+
+            is_new = is_new_yt_channel(ch['id'])
+            has_contact = 1 if (email or tg) else 0
+
+            final_results.append({
+                'is_new_flag': 1 if is_new else 0,
+                'has_contact': has_contact,
+                'Статус': '🆕 Новый' if is_new else '♻️ Уже был',
+                'Канал': ch['title'],
+                'Подписчики': ch['subs'],
+                'Ср. просмотры': avg_views,
+                'Ср. длина (мин)': round(avg_dur_min, 1),
+                'Последнее видео': latest_vid['pub_str'],
+                'Email': email if email else '—',
+                'Telegram': tg if tg else '—',
+                'Другие ссылки': links if links else '—',
+                'Вкладка О канале': f"https://www.youtube.com/channel/{ch['id']}/about",
+                'Последний ролик': f"https://www.youtube.com/watch?v={latest_vid['id']}",
+                'Ссылка на канал': f"https://www.youtube.com/channel/{ch['id']}"
+            })
+
+        # Сортируем: сначала новые, затем с найденными контактами, затем по просмотрам
+        final_results.sort(key=lambda x: (x['is_new_flag'], x['has_contact'], x['Ср. просмотры']), reverse=True)
+        return {"items": final_results, "lang": target_lang}
+
+    except Exception as e:
+        logging.error(f"YouTube search error: {e}")
+        return {"error": str(e)}
+
+def generate_yt_excel(data):
+    try:
+        if not data:
+            return None
+
+        clean_rows = []
+        for item in data:
+            clean_rows.append({
+                'Статус': item['Статус'],
+                'Канал': item['Канал'],
+                'Подписчики': item['Подписчики'],
+                'Ср. просмотры': item['Ср. просмотры'],
+                'Ср. длина (мин)': item['Ср. длина (мин)'],
+                'Последнее видео': item['Последнее видео'],
+                'Email': item['Email'],
+                'Telegram': item['Telegram'],
+                'Другие ссылки': item['Другие ссылки'],
+                'Вкладка О канале': item['Вкладка О канале'],
+                'Последний ролик': item['Последний ролик'],
+                'Ссылка на канал': item['Ссылка на канал'],
+            })
+
+        df = pd.DataFrame(clean_rows)
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='YouTube_Каналы')
+            ws = writer.sheets['YouTube_Каналы']
+
+            header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True)
+            link_font = Font(color="0000FF", underline="single")
+
+            widths = {
+                'Статус': 14, 'Канал': 28, 'Подписчики': 15, 'Ср. просмотры': 16,
+                'Ср. длина (мин)': 16, 'Последнее видео': 16, 'Email': 28, 'Telegram': 22,
+                'Другие ссылки': 35, 'Вкладка О канале': 35, 'Последний ролик': 35, 'Ссылка на канал': 35
+            }
+
+            for col_num, col_name in enumerate(df.columns):
+                cell = ws.cell(row=1, column=col_num + 1)
+                cell.fill = header_fill
+                cell.font = header_font
+                ws.column_dimensions[chr(65 + col_num)].width = widths.get(col_name, 20)
+
+            link_cols = ['Вкладка О канале', 'Последний ролик', 'Ссылка на канал']
+            link_indices = [df.columns.get_loc(c) + 1 for c in link_cols if c in df.columns]
+
+            for row in range(2, len(df) + 2):
+                for idx in link_indices:
+                    cell_link = ws.cell(row=row, column=idx)
+                    if cell_link.value and str(cell_link.value).startswith('http'):
+                        cell_link.hyperlink = cell_link.value
+                        cell_link.font = link_font
+
+            ws.freeze_panes = 'A2'
+
+        output.seek(0)
+        return output
+    except Exception as e:
+        logging.error(f"YouTube Excel error: {e}")
+        return None
 
 @dp.message_handler(commands=['start'], state="*")
 async def start_cmd(message: types.Message, state: FSMContext):
@@ -793,117 +1143,46 @@ async def btn_course(message: types.Message, state: FSMContext):
     await SearchMode.course.set() # Включаем режим курсов
     await message.answer("🎓 **РЕЖИМ: ПОИСК КУРСОВ**\n\nНапиши тему, которую хочешь изучить (например: `python`, `дизайн`, `ии генерация видео`).", parse_mode="Markdown")
 
-# Срабатывает ТОЛЬКО если включен режим курсов
-@dp.message_handler(state=SearchMode.course)
-async def process_course_search(message: types.Message, state: FSMContext):
-    if message.text.startswith('/'):
-        return
-
-    query = message.text.strip()
-    wait = await message.answer(f"📚 Ищу бесплатные курсы по теме: `{query}`...", parse_mode="Markdown")
-
-    try:
-        # 1. Stepik (быстрый)
-        stepik_courses = search_stepik(query)
-
-        # 2. Новый поиск (Microsoft Learn пока отключаем, он тяжёлый)
-        free_courses = search_free_courses(query, limit_per_source=5)
-
-                # Формируем ответ
-        text = f"🎓 БЕСПЛАТНЫЕ МАТЕРИАЛЫ: «{query.upper()}»\n\n"
-
-        # Stepik
-        if stepik_courses:
-            text += "🟢 Stepik:\n"
-            for c in stepik_courses[:3]:
-                title = c['title'].replace('[', '').replace(']', '').replace('*', '').replace('_', '')
-                text += f"• {title}\n  {c['url']}\n  {c['desc']}...\n\n"
-        else:
-            text += "🟢 Stepik: ничего не найдено\n\n"
-
-        # Остальные источники
-        if free_courses:
-            text += "📘 Другие источники:\n\n"
-            for item in free_courses[:8]:
-                clean = item.get('text', '')
-                # Убираем markdown-символы
-                clean = clean.replace('**', '').replace('*', '').replace('_', '').replace('`', '')
-                text += f"{clean}\n\n"
-        else:
-            text += "📘 Дополнительные источники пока пусты\n\n"
-
-        # Telegram
-        await wait.edit_text("📡 Проверяю Telegram-каналы школ...")
-        
-        try:
-            tg_edu = await search_telegram_history(
-                query, 
-                limit_per_channel=2, 
-                target_channels=EDU_CHANNELS
-            )
-            if tg_edu:
-                text += "📱 Свежее в Telegram-школах:\n"
-                for j in tg_edu[:2]:
-                    text += f"• {j['Компания']}: {j['Ссылка']}\n"
-            else:
-                text += "📱 Telegram-школы: ничего нового\n"
-        except Exception as e:
-            logging.error(f"TG Edu error: {e}")
-            text += "📱 Telegram-школы: временно недоступны\n"
-
-        # Отправляем БЕЗ parse_mode — так не будет ошибок
-        await wait.edit_text(text, parse_mode=None, disable_web_page_preview=True)
-
-    except Exception as e:
-        logging.error(f"Ошибка поиска курсов: {e}")
-        await wait.edit_text(
-            f"❌ Произошла ошибка при поиске курсов.\n"
-            f"Попробуй ещё раз чуть позже.\n\nОшибка: `{str(e)[:100]}`",
-            parse_mode="Markdown"
-        )
+@dp.message_handler(text="🎬 YouTube-каналы", state="*")
+async def btn_youtube(message: types.Message, state: FSMContext):
+    await SearchMode.youtube.set()
+    await message.answer(
+        "🎬 <b>РЕЖИМ: ПОИСК YOUTUBE-КАНАЛОВ</b>\n\n"
+        "Напиши тематику канала (на русском или английском — язык определится сам).\n\n"
+        "📌 <i>Примеры:</i> <code>документальное кино</code>, <code>обзор авто</code>, <code>тру крайм</code>, <code>documentary</code>, <code>car review</code>\n\n"
+        "Я отсею Shorts и мёртвые каналы, найду активные (от 20к подписчиков, от 15к просмотров, ролики от 7 минут), соберу Email/Telegram и пришлю Excel.",
+        parse_mode="HTML"
+    )
 
 @dp.message_handler(text="🔔 Мои подписки", state="*")
 @dp.message_handler(commands=['mysubs'], state="*")
 async def list_subs(message: types.Message, state: FSMContext):
     conn = None
     try:
-        # Устанавливаем таймаут, чтобы подождать, если база занята
         conn = sqlite3.connect('manager.db', timeout=20)
         cursor = conn.cursor()
         cursor.execute('CREATE TABLE IF NOT EXISTS subs (user_id INTEGER, keyword TEXT, UNIQUE(user_id, keyword))')
-        
         data = cursor.execute('SELECT keyword FROM subs WHERE user_id = ?', (message.from_user.id,)).fetchall()
-        
         if not data:
             await message.answer("У тебя пока нет активных подписок. 🤷‍♂️")
         else:
-            # Используем HTML, чтобы не конфликтовать с Markdown
             subs_list = "\n".join([f"✅ <code>{html.escape(row[0])}</code>" for row in data])
             await message.answer(f"🔔 <b>Твои подписки:</b>\n\n{subs_list}\n\n🗑 <code>/del слово</code>", parse_mode="HTML")
-            
     except Exception as e:
         logging.error(f"Ошибка в mysubs: {e}")
         await message.answer("⚠ Ошибка базы данных. Попробуй еще раз через 5 секунд.")
     finally:
         if conn:
             conn.close()
-        
+
 @dp.message_handler(commands=['del'], state="*")
 async def del_sub(message: types.Message):
-    # Извлекаем слово, которое идет после команды /del
     keyword = message.get_args().lower().strip()
-
     if not keyword:
-        await message.answer(
-            "⚠ Нужно указать слово для удаления.\n\nПример: `/del режиссер`", 
-            parse_mode="Markdown"
-        )
+        await message.answer("⚠ Нужно указать слово для удаления.\n\nПример: `/del режиссер`", parse_mode="Markdown")
         return
-
     conn = sqlite3.connect('manager.db')
-    # Проверяем, была ли такая подписка
     res = conn.execute('SELECT 1 FROM subs WHERE user_id = ? AND keyword = ?', (message.from_user.id, keyword)).fetchone()
-
     if res:
         conn.execute('DELETE FROM subs WHERE user_id = ? AND keyword = ?', (message.from_user.id, keyword))
         conn.commit()
@@ -919,6 +1198,115 @@ async def clear_subs(message: types.Message):
     conn.commit()
     conn.close()
     await message.answer("📴 Мониторинг остановлен. Все твои подписки были успешно удалены.")
+
+# --- НИЖЕ СТОЯТ ОБРАБОТЧИКИ ТЕКСТА В РЕЖИМАХ ---
+
+@dp.message_handler(state=SearchMode.course)
+async def process_course_search(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        return
+
+    query = message.text.strip()
+    wait = await message.answer(f"📚 Ищу бесплатные курсы по теме: `{query}`...", parse_mode="Markdown")
+
+    try:
+        stepik_courses = search_stepik(query)
+        free_courses = search_free_courses(query, limit_per_source=5)
+
+        text = f"🎓 БЕСПЛАТНЫЕ МАТЕРИАЛЫ: «{query.upper()}»\n\n"
+        if stepik_courses:
+            text += "🟢 Stepik:\n"
+            for c in stepik_courses[:3]:
+                title = c['title'].replace('[', '').replace(']', '').replace('*', '').replace('_', '')
+                text += f"• {title}\n  {c['url']}\n  {c['desc']}...\n\n"
+        else:
+            text += "🟢 Stepik: ничего не найдено\n\n"
+
+        if free_courses:
+            text += "📘 Другие источники:\n\n"
+            for item in free_courses[:8]:
+                clean = item.get('text', '')
+                clean = clean.replace('**', '').replace('*', '').replace('_', '').replace('`', '')
+                text += f"{clean}\n\n"
+        else:
+            text += "📘 Дополнительные источники пока пусты\n\n"
+
+        await wait.edit_text("📡 Проверяю Telegram-каналы школ...")
+        try:
+            tg_edu = await search_telegram_history(query, limit_per_channel=2, target_channels=EDU_CHANNELS)
+            if tg_edu:
+                text += "📱 Свежее в Telegram-школах:\n"
+                for j in tg_edu[:2]:
+                    text += f"• {j['Компания']}: {j['Ссылка']}\n"
+            else:
+                text += "📱 Telegram-школы: ничего нового\n"
+        except Exception as e:
+            logging.error(f"TG Edu error: {e}")
+            text += "📱 Telegram-школы: временно недоступны\n"
+
+        await wait.edit_text(text, parse_mode=None, disable_web_page_preview=True)
+    except Exception as e:
+        logging.error(f"Ошибка поиска курсов: {e}")
+        await wait.edit_text(f"❌ Произошла ошибка при поиске курсов.\nПопробуй ещё раз чуть позже.\n\nОшибка: `{str(e)[:100]}`", parse_mode="Markdown")
+
+@dp.message_handler(state=SearchMode.youtube)
+async def process_youtube_search(message: types.Message, state: FSMContext):
+    if message.text.startswith('/'):
+        return
+
+    query = message.text.strip()
+    wait = await message.answer(
+        f"🎬 Ищу живые каналы по теме: <b>{html.escape(query)}</b>...\n"
+        f"<i>Проверяю аудиторию, отсеиваю Shorts и собираю контакты (это займет 15–25 секунд).</i>",
+        parse_mode="HTML"
+    )
+
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(None, search_youtube_channels, query)
+
+    if "error" in res:
+        err = res["error"]
+        if err == "NO_KEY":
+            await wait.edit_text("❌ Не найден ключ <code>YOUTUBE_API_KEY</code>. Добавь его в переменные окружения на хостинге.", parse_mode="HTML")
+        else:
+            await wait.edit_text(f"❌ Ошибка при поиске:\n<code>{html.escape(err[:250])}</code>", parse_mode="HTML")
+        return
+
+    items = res.get("items", [])
+    if not items:
+        await wait.edit_text(
+            f"🤷‍♂️ По запросу <b>«{html.escape(query)}»</b> не нашлось каналов, проходящих под «денежные» фильтры "
+            f"(от 20к подписчиков, от 15к просмотров, длинные ролики от 7 минут).\n\n"
+            f"Попробуй написать запрос чуть шире (например, <code>авто</code> вместо <code>ремонт старых бмв</code>).",
+            parse_mode="HTML"
+        )
+        return
+
+    lang_label = "🇷🇺 RU" if res.get("lang") == "ru" else "🇬🇧 EN"
+    preview_text = f"✅ Найдено каналов ({lang_label}): <b>{len(items)}</b>\n<b>Топ-5 из выборки:</b>\n\n"
+    for ch in items[:5]:
+        contacts = []
+        if ch['Email'] != '—': contacts.append(f"📧 {ch['Email']}")
+        if ch['Telegram'] != '—': contacts.append(f"✈️ {ch['Telegram']}")
+        c_str = " | ".join(contacts) if contacts else "🔒 Почта под капчей (см. ссылку в Excel)"
+        preview_text += (
+            f"{ch['Статус']} <b>{html.escape(ch['Канал'])}</b>\n"
+            f"👥 {ch['Подписчики']:,} | 👁 ~{ch['Ср. просмотры']:,} | ⏱ {ch['Ср. длина (мин)']} мин\n"
+            f"{c_str}\n"
+            f"{ch['Ссылка на канал']}\n\n"
+        )
+
+    await wait.delete()
+    await message.answer(preview_text, parse_mode="HTML", disable_web_page_preview=True)
+
+    excel_file = generate_yt_excel(items)
+    if excel_file:
+        safe_name = re.sub(r'[^\w\s-]', '', query).strip().replace(' ', '_')[:25] or 'channels'
+        await message.answer_document(
+            types.InputFile(excel_file, filename=f"YT_{safe_name}.xlsx"),
+            caption=f"📊 Готовая база: <b>{len(items)}</b> каналов по запросу «{html.escape(query)}».\nВнутри все ссылки, контакты и вкладка «О канале».",
+            parse_mode="HTML"
+        )
 
 @dp.message_handler(state=None)
 async def manual_search(message: types.Message):
