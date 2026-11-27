@@ -845,11 +845,11 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None,
     if not api_key:
         return {"error": "NO_KEY"}
 
-    # Настройки: ловим и гигантов, и молодые растущие каналы
-    MIN_SUBS = 10000
-    MAX_SUBS = 20000000
-    MIN_AVG_VIEWS = 12000
-    MIN_AVG_DURATION_MIN = 5.0
+    # Новые фильтры: от 300к подписчиков, упор на крупные продакшн-каналы
+    MIN_SUBS = 300000
+    MAX_SUBS = 30000000
+    MIN_AVG_VIEWS = 30000
+    MIN_AVG_DURATION_MIN = 8.0
     MAX_DAYS_SINCE_LAST = 60
 
     exclude_set = exclude_cids or set()
@@ -858,16 +858,16 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None,
     target_lang = 'ru' if is_russian else 'en'
 
     try:
-        # 1. Двойной поиск (до 100 видео на нишу: флагманы + свежие растущие за 30 дней)
+        # 1. Двойной поиск (до 100 видео на нишу: самые просматриваемые + свежие)
         if video_duration:
             search_passes = [
-                ('viewCount', video_duration, 90),
-                ('relevance', video_duration, 30)
+                ('viewCount', video_duration, 120),
+                ('relevance', video_duration, 60)
             ]
         else:
             search_passes = [
-                ('viewCount', 'long', 90),
-                ('relevance', None, 45)
+                ('viewCount', 'long', 120),
+                ('relevance', 'long', 60)
             ][:pages]
 
         channel_ids = []
@@ -933,7 +933,7 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None,
         if not channels_info:
             return {"items": [], "lang": target_lang}
 
-        # 3. Проверяем до 100 каналов (ускоренно в 8 потоков)
+        # 3. Проверяем до 100 каналов (в 8 потоков)
         from concurrent.futures import ThreadPoolExecutor
         candidate_list = list(channels_info.values())[:100]
         channel_video_ids = {}
@@ -962,7 +962,7 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None,
         if not all_video_ids:
             return {"items": [], "lang": target_lang}
 
-        # 4. Выгружаем статистику и длительность всех видео пачками по 50
+        # 4. Выгружаем статистику, категории и длительность видео
         videos_data = {}
         unique_vids = list(dict.fromkeys(all_video_ids))
         for i in range(0, len(unique_vids), 50):
@@ -977,24 +977,58 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None,
             for v in r.json().get('items', []):
                 videos_data[v['id']] = v
 
-        # 5. Финальный отбор каналов
+        # Стоп-слова по темам, которые мы исключили
+        bad_channel_words = (
+            'авто', 'тест-драйв', 'тест драйв', 'автоподбор', 'дрифт', 'гараж',
+            'роблокс', 'roblox', 'майнкрафт', 'minecraft', 'гейминг', 'gaming', 'play', 'стрим', 'twitch', 'твич',
+            'электроник', 'гаджет', 'техно', 'айфон', 'wylsa', 'droider',
+            'бьюти', 'beauty', 'визаж', 'макияж', 'makeup', 'косметик',
+            'влог', 'vlog', 'вязание', 'повязать', 'рукоделие', 'вышивк', 'лайфстайл', 'lifestyle',
+            'фитнес', 'fitness', 'мма', 'mma', 'ufc', 'бокс', 'спорт',
+            'пранк', 'prank', 'нарезк', 'кинокомпот', 'блокбастер', 'мелодрам', 'русский телик',
+            'лучшие фильмы', 'новые фильмы', 'kingsize films', 'best film', 'времякино', 'для сна',
+            'live', 'новости', 'news', 'шейтельман', 'ходорковский', 'дождь', 'спивак', 'франклин'
+        )
+        bad_video_words = (
+            'роблокс', 'roblox', 'майнкрафт', 'minecraft', 'brawl stars', 'cs2', 'dota', 'gta ', 'летсплей', 'стрим',
+            'тест-драйв', 'тест драйв', 'автоподбор', 'автообзор', 'обзор авто', 'разгон до 100',
+            'обзор смартфона', 'обзор iphone', 'сборка пк', 'видеокарт', 'распаковка техники',
+            'макияж', 'косметичка', 'визажист', 'уход за кожей', 'крашусь', 'вязание', 'крючком', 'спицами',
+            'тренировка', 'похудеть', 'бой ufc', 'пранк', 'prank', 'розыгрыш',
+            'прямой эфир', 'утренний стрим', 'вечерний стрим', 'сводка новостей', 'новости дня', 'главные новости'
+        )
+        # Категории YouTube: 2 = Авто, 17 = Спорт, 20 = Видеоигры
+        banned_categories = {'2', '17', '20'}
+
         final_results = []
         now_utc = datetime.utcnow()
 
         for ch in candidate_list:
+            ch_title_low = ch['title'].lower()
+            if any(bw in ch_title_low for bw in bad_channel_words):
+                continue
+
             vids = channel_video_ids.get(ch['id'], [])
             long_videos = []
             titles_for_lang = [ch['title']]
+            cat_ids = []
+            bad_vid_hits = 0
 
             for vid in vids:
                 v_obj = videos_data.get(vid)
                 if not v_obj:
                     continue
                 v_snip = v_obj.get('snippet', {})
-                titles_for_lang.append(v_snip.get('title', ''))
+                v_title = v_snip.get('title', '')
+                titles_for_lang.append(v_title)
                 dur_sec = parse_yt_duration(v_obj.get('contentDetails', {}).get('duration', ''))
 
                 if dur_sec > 180:
+                    cat_ids.append(str(v_snip.get('categoryId', '')))
+                    v_title_low = v_title.lower()
+                    if any(bw in v_title_low for bw in bad_video_words):
+                        bad_vid_hits += 1
+
                     views = int(v_obj.get('statistics', {}).get('viewCount', 0))
                     pub_str = v_snip.get('publishedAt', '')[:10]
                     long_videos.append({
@@ -1011,15 +1045,22 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None,
             if len(long_videos) < 3:
                 continue
 
+            # Если большинство видео из категорий Авто/Спорт/Игры — выкидываем
+            banned_cat_count = sum(1 for c in cat_ids if c in banned_categories)
+            if banned_cat_count >= len(long_videos) / 2:
+                continue
+
+            # Если 30%+ последних видео со стоп-словами (стримы, тачки, пранки, косметика) — выкидываем
+            if bad_vid_hits >= max(2, len(long_videos) * 0.3):
+                continue
+
             avg_dur_min = sum(v['dur_sec'] for v in long_videos) / len(long_videos) / 60.0
             avg_views = int(sum(v['views'] for v in long_videos) / len(long_videos))
 
             if avg_dur_min < MIN_AVG_DURATION_MIN or avg_views < MIN_AVG_VIEWS:
                 continue
 
-            title_low = ch['title'].lower()
-            junk_words = ('мелодрам', 'кинокомпот', 'блокбастер', 'русский телик', 'лучшие фильмы', 'новые фильмы', 'kingsize films', 'best film', 'времякино')
-            if any(jw in title_low for jw in junk_words) or (avg_dur_min > 120 and any(w in title_low for w in ('кино', 'фильм', 'сериал'))):
+            if avg_dur_min > 120 and any(w in ch_title_low for w in ('кино', 'фильм', 'сериал')):
                 continue
 
             long_videos.sort(key=lambda x: x['pub_str'], reverse=True)
@@ -1037,14 +1078,13 @@ def search_youtube_channels(query, pages=2, genre_label=None, exclude_cids=None,
             is_new = is_new_yt_channel(ch['id'])
             has_contact = 1 if (email or tg) else 0
 
-            # Определяем сегмент: растущий, флагман или активный середняк
             subs = ch['subs']
-            if subs <= 300000 and avg_views >= subs * 0.45:
-                segment = '🚀 Растущий'
-            elif subs >= 500000:
-                segment = '🔥 Флагман'
+            if subs >= 1000000:
+                segment = '🔥 Миллионник'
+            elif avg_views >= subs * 0.45:
+                segment = '🚀 Быстрорастущий'
             else:
-                segment = '💼 Активный'
+                segment = '💼 Крупный'
 
             final_results.append({
                 'channel_id': ch['id'],
@@ -1234,7 +1274,7 @@ def generate_yt_excel(data):
             df.to_excel(writer, index=False, sheet_name='Все_каналы')
             format_ws(writer.sheets['Все_каналы'], df)
 
-            df_growing = df[df['Сегмент'] == '🚀 Растущий']
+            df_growing = df[df['Сегмент'].str.contains('Растущий|Быстрорастущий', na=False)]
             if not df_growing.empty:
                 df_growing.to_excel(writer, index=False, sheet_name='Растущие')
                 format_ws(writer.sheets['Растущие'], df_growing)
@@ -1300,15 +1340,16 @@ async def btn_youtube(message: types.Message, state: FSMContext):
     await SearchMode.youtube.set()
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton("🔥 Авто-сбор: Все 14 ниш (RU)", callback_data="yt_batch|ru"),
-        types.InlineKeyboardButton("🌍 Авто-сбор: Все 14 ниш (EN)", callback_data="yt_batch|en")
+        types.InlineKeyboardButton("🔥 Авто-сбор: Топ-ниши 300к+ (RU)", callback_data="yt_batch|ru"),
+        types.InlineKeyboardButton("🌍 Авто-сбор: Топ-ниши 300к+ (EN)", callback_data="yt_batch|en")
     )
     await message.answer(
-        "🎬 <b>РЕЖИМ: ПОИСК YOUTUBE-КАНАЛОВ</b>\n\n"
-        "Нажми кнопку ниже, чтобы я собрал большую базу по 14 нишам (и гигантов, и молодые 🚀 растущие каналы).\n\n"
+        "🎬 <b>РЕЖИМ: ПОИСК КРУПНЫХ YOUTUBE-КАНАЛОВ (300к+)</b>\n\n"
+        "Ищу кулинарные и тревел-шоу, документалки (как Редакция), доки о моде и брендах, развлекательные и детские шоу — "
+        "без тачек, игр, бьюти, влогов и говорящих голов.\n\n"
         "✍️ <b>Или напиши сюда:</b>\n"
-        "• любую свою тему (<code>документалка</code>, <code>documentary</code>)\n"
-        "• либо список каналов через @ или ссылки (<code>@GEOSHOW @redactsiya</code>) — я вытащу их контакты в таблицу.",
+        "• свою тему\n"
+        "• либо список каналов через @ или ссылки (<code>@redactsiya @GEOSHOW</code>) — вытащу контакты прямо в Google Таблицу.",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -1482,36 +1523,27 @@ async def process_youtube_search(message: types.Message, state: FSMContext):
 
 YT_DEFAULT_GENRES = {
     'ru': [
-        ('Научпоп, космос и история', 'космос|наука|история|аномалии|мифы', 'long'),
-        ('Журналистика и расследования', 'расследование|репортаж|журналистика|новости неделя', 'long'),
-        ('Интервью и подкасты', 'большое интервью|подкаст|ток шоу', 'long'),
-        ('Юмор и энтертеймент', 'юмористическое шоу|стендап|импровизация|скетч', 'long'),
-        ('Бренды и бизнес', 'бизнес шоу|история бренда|как устроен бизнес', 'long'),
-        ('Авто и тест-драйвы', 'автообзор|тест драйв|автоподбор', 'long'),
-        ('Недвижимость и рум-туры', 'рум тур|обзор квартиры|элитная недвижимость', 'long'),
-        ('Тревел-шоу', 'путешествие|экспедиция|тревел влог', 'long'),
-        ('Еда и гастро-шоу', 'кулинарное шоу|обзор ресторанов|фуд шоу', 'long'),
-        ('Бьюти', 'бьюти шоу|макияж обзор', 'medium'),
-        ('Фэшн и стиль', 'мода фэшн|разбор гардероба|стиль', 'medium'),
-        ('Лайфстайл', 'лайфстайл влог|день из жизни', 'medium'),
-        ('Музыка и бэкстейдж', 'музыкальное шоу|бэкстейдж клипа|разбор трека', 'medium'),
-        ('Спорт и фитнес', 'спорт шоу|фитнес челлендж|бои обзор', 'medium'),
+        ('Большие кулинарные шоу', 'кулинарное шоу|битва шефов|шоу шеф повар|гастро шоу|кондитер шоу', 'long'),
+        ('Документалки и журналистика', 'документальный фильм|большой репортаж|фильм расследование|редакция пивоваров|документальное кино', 'long'),
+        ('Документалки о моде и брендах', 'история моды|документальный фильм о моде|модный дом история|история бренда', 'long'),
+        ('Большие тревел-шоу', 'тревел шоу|большое путешествие|орел и решка|экспедиция фильм|тревел проект', 'long'),
+        ('Развлекательные шоу (не юмор)', 'развлекательное шоу|реалити шоу|выживание шоу|большое шоу|челлендж шоу', 'long'),
+        ('Шоу с участием детей', 'детское шоу|шоу с детьми|дети шоу|лучше всех|семейное шоу', 'long'),
+        ('Крупные юмористические шоу', 'импровизация шоу|плюшки шоу|стендап шоу|чбд', 'long'),
+        ('Большие интервью и подкасты', 'большое интервью|видеоподкаст|подкаст шоу', 'long'),
+        ('Научпоп, космос и история', 'научпоп|космос документальный|загадки истории|архив аномалий|вселенная плюс', 'long'),
+        ('Музыкальные шоу и фильмы', 'музыкальное шоу|музыкальный фильм|история музыки|бэкстейдж съемок', 'medium'),
     ],
     'en': [
-        ('Science, Space & History', 'space documentary|history mystery|science explained', 'long'),
-        ('Investigative Journalism', 'investigative journalism|video essay|documentary', 'long'),
-        ('Interviews & Podcasts', 'video podcast|interview show', 'long'),
-        ('Entertainment & Comedy', 'comedy show|entertainment show|sketch comedy', 'long'),
-        ('Brands & Business', 'brand documentary|business story|how it is made', 'long'),
-        ('Auto & Cars', 'car review|automotive show', 'long'),
-        ('Luxury Real Estate', 'luxury real estate tour|house tour', 'long'),
-        ('Travel Shows', 'travel documentary|expedition vlog', 'long'),
-        ('Food & Cooking', 'cooking show|food documentary|restaurant review', 'long'),
-        ('Beauty', 'beauty routine|makeup tutorial', 'medium'),
-        ('Fashion', 'fashion show|styling lookbook', 'medium'),
-        ('Lifestyle', 'lifestyle vlog|day in my life', 'medium'),
-        ('Music & Backstage', 'music documentary|behind the scenes music', 'medium'),
-        ('Sports & Fitness', 'sports documentary|fitness challenge', 'medium'),
+        ('Big Cooking & Food Shows', 'cooking competition show|chef show|gastronomy documentary|food show', 'long'),
+        ('Documentary & Journalism', 'documentary film|investigative journalism|mini documentary|special report', 'long'),
+        ('Fashion Docs & Brands', 'fashion documentary|history of fashion|fashion house documentary|brand documentary', 'long'),
+        ('Big Travel Shows', 'travel show|travel documentary|expedition documentary', 'long'),
+        ('Entertainment & Reality Shows', 'reality show|survival challenge show|game show|big challenge', 'long'),
+        ('Kids & Family Shows', 'kids talent show|family game show|children show', 'long'),
+        ('Interviews & Video Podcasts', 'video podcast|long interview|talk show', 'long'),
+        ('Science, Space & History', 'science documentary|space documentary|history documentary', 'long'),
+        ('Music Shows & Docs', 'music documentary|music show|behind the scenes music film', 'medium'),
     ]
 }
 
